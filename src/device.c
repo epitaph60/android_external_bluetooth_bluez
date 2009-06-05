@@ -718,6 +718,74 @@ static DBusMessage *disconnect(DBusConnection *conn, DBusMessage *msg,
 	return NULL;
 }
 
+static DBusMessage *get_service_attribute_value_reply(DBusMessage *msg, DBusConnection *conn,
+							sdp_data_t *attr)
+{
+	DBusMessage *reply;
+	DBusMessageIter iter;
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return;
+	sdp_data_t *curr;
+	sdp_list_t *ap = 0;
+	for (; attr; attr = attr->next) {
+		sdp_list_t *pds = 0;
+		for (curr = attr->val.dataseq; curr; curr = curr->next)
+			pds = sdp_list_append(pds, curr->val.dataseq);
+		ap = sdp_list_append(ap, pds);
+	}
+
+	int ch = sdp_get_proto_port(ap, RFCOMM_UUID);
+	sdp_list_foreach(ap, (sdp_list_func_t) sdp_list_free, NULL);
+	sdp_list_free(ap, NULL);
+	ap = NULL;
+
+	dbus_message_append_args(reply, DBUS_TYPE_INT32, &ch, DBUS_TYPE_INVALID);
+
+	return reply;
+}
+
+static DBusMessage *get_service_attribute_value(DBusConnection *conn,
+						DBusMessage *msg,
+						void *user_data)
+{
+	struct btd_device *device = user_data;
+	sdp_record_t *rec;
+	sdp_data_t *attr_data;
+	const char *pattern;
+	uint16_t attrId;
+	int err;
+
+	if (device->browse)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".InProgress",
+						"Discover in progress");
+	if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &pattern,
+					DBUS_TYPE_UINT16, &attrId,
+					DBUS_TYPE_INVALID) == FALSE)
+		goto fail;
+
+	if (strlen(pattern) == 0)
+		return invalid_args(msg);
+
+	rec = btd_device_get_record(device, pattern);
+	if (rec == NULL) {
+		error("rec is NULL");
+		goto fail;
+	}
+
+	attr_data = sdp_data_get(rec, attrId);
+
+	if (attr_data == NULL) {
+		error("attr in null");
+		goto fail;
+	}
+	return get_service_attribute_value_reply(msg, conn, attr_data);
+fail:
+	return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
+					"GetServiceAttribute Failed");
+}
+
 static GDBusMethodTable device_methods[] = {
 	{ "GetProperties",	"",	"a{sv}",	get_properties	},
 	{ "SetProperty",	"sv",	"",		set_property	},
@@ -726,6 +794,7 @@ static GDBusMethodTable device_methods[] = {
 	{ "CancelDiscovery",	"",	"",		cancel_discover	},
 	{ "Disconnect",		"",	"",		disconnect,
 						G_DBUS_METHOD_FLAG_ASYNC},
+	{ "GetServiceAttributeValue",  "sq", "i",       get_service_attribute_value},
 	{ }
 };
 

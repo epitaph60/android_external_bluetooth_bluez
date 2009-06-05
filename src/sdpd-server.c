@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <cutils/sockets.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/l2cap.h>
@@ -119,30 +120,44 @@ static int init_server(uint16_t mtu, int master, int compat)
 		unix_sock = -1;
 		return 0;
 	}
+#if 0
+        /* Create local Unix socket */
+        unix_sock = socket(PF_UNIX, SOCK_STREAM, 0);
+        if (unix_sock < 0) {
+                error("opening UNIX socket: %s", strerror(errno));
+                return -1;
+        }
 
-	/* Create local Unix socket */
-	unix_sock = socket(PF_UNIX, SOCK_STREAM, 0);
-	if (unix_sock < 0) {
-		error("opening UNIX socket: %s", strerror(errno));
-		return -1;
-	}
+        memset(&unaddr, 0, sizeof(unaddr));
+        unaddr.sun_family = AF_UNIX;
+        strcpy(unaddr.sun_path, SDP_UNIX_PATH);
 
-	memset(&unaddr, 0, sizeof(unaddr));
-	unaddr.sun_family = AF_UNIX;
-	strcpy(unaddr.sun_path, SDP_UNIX_PATH);
+        unlink(unaddr.sun_path);
 
-	unlink(unaddr.sun_path);
+        if (bind(unix_sock, (struct sockaddr *) &unaddr, sizeof(unaddr)) < 0) {
+                error("binding UNIX socket: %s", strerror(errno));
+                return -1;
+        }
 
-	if (bind(unix_sock, (struct sockaddr *) &unaddr, sizeof(unaddr)) < 0) {
-		error("binding UNIX socket: %s", strerror(errno));
-		return -1;
-	}
+        listen(unix_sock, 5);
 
-	listen(unix_sock, 5);
+        chmod(SDP_UNIX_PATH, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+#else
+        unix_sock = android_get_control_socket("bluetooth");
+        if (unix_sock < 0) {
+                error("Unable to get the control socket for 'bluetooth'");
+                return -1;
+        }
 
-	chmod(SDP_UNIX_PATH, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+        if (listen(unix_sock, 5)) {
+                error("Listening on local socket failed: %s", strerror(errno));
+                return -1;
+        }
 
-	return 0;
+        info("Got Unix socket fd '%d' from environment", unix_sock);
+#endif
+
+        return 0;
 }
 
 static gboolean io_session_event(GIOChannel *chan, GIOCondition cond, gpointer data)

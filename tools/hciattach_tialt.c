@@ -96,9 +96,37 @@ typedef struct {
 	uint32_t speed;
 } __attribute__((packed)) texas_speed_change_cmd_t;
 
-static int texas_change_speed(int fd, uint32_t speed)
+static int texas_change_speed(int fd, struct termios *ti, uint32_t speed)
 {
-	return 0;
+        /* Send a speed-change request */
+        texas_speed_change_cmd_t cmd;
+        int n;
+
+        cmd.uart_prefix = HCI_COMMAND_PKT;
+        cmd.hci_hdr.opcode = 0xff36;
+        cmd.hci_hdr.plen = sizeof(uint32_t);
+        cmd.speed = speed;
+
+        fprintf(stderr, "Setting speed to %d\n", speed);
+        n = write(fd, &cmd, sizeof(cmd));
+        if (n < 0) {
+                perror("Failed to write speed-set command");
+                return -1;
+        }
+        if (n < (int)sizeof(cmd)) {
+                fprintf(stderr, "Wanted to write %d bytes, could only write %d. "
+                "Stop\n", (int)sizeof(cmd), n);
+                return -1;
+        }
+        /* Parse speed-change reply */
+        if (read_command_complete(fd, cmd.hci_hdr.opcode, cmd.hci_hdr.plen) < 0) {
+                return -1;
+        }
+        if (set_speed(fd, ti, speed) < 0) {
+                perror("Can't set baud rate");
+                return -1;
+        }
+        return 0;
 }
 
 static int texas_load_firmware(int fd, const char *firmware) {
@@ -234,7 +262,7 @@ int texasalt_init(int fd, int speed, struct termios *ti)
 		sprintf(fw, "/etc/firmware/%s.bin", c_brf_chip[brf_chip]);
 		texas_load_firmware(fd, fw);
 
-		texas_change_speed(fd, speed);
+		texas_change_speed(fd, ti, speed);
 	}
 	nanosleep(&tm, NULL);
 	return 0;

@@ -40,6 +40,10 @@
 
 #include "textfile.h"
 
+#ifndef HAVE_FDATASYNC
+#define fdatasync fsync
+#endif
+
 int create_dirs(const char *filename, const mode_t mode)
 {
 	struct stat st;

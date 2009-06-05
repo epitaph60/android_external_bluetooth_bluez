@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#include <netinet/in.h>
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>

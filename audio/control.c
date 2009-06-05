@@ -103,7 +103,7 @@
 #define BACKWARD_OP		0x4c
 
 static DBusConnection *connection = NULL;
-
+static gchar *input_device_name = NULL;
 static GSList *servers = NULL;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -603,11 +603,16 @@ static int uinput_create(char *name)
 
 static void init_uinput(struct control *control)
 {
-	char address[18];
+	char address[18], *name;
 
 	ba2str(&control->dev->dst, address);
 
-	control->uinput = uinput_create(address);
+	/* Use device name from config file if specified */
+	name = input_device_name;
+	if (!name)
+		name = address;
+
+	control->uinput = uinput_create(name);
 	if (control->uinput < 0)
 		error("AVRCP: failed to init uinput for %s", address);
 	else
@@ -803,6 +808,14 @@ int avrcp_register(DBusConnection *conn, const bdaddr_t *src, GKeyFile *config)
 			g_error_free(err);
 		} else
 			master = tmp;
+		err = NULL;
+		input_device_name = g_key_file_get_string(config,
+			"AVRCP", "InputDeviceName", &err);
+		if (err) {
+			debug("audio.conf: %s", err->message);
+			input_device_name = NULL;
+			g_error_free(err);
+		}
 	}
 
 	server = g_new0(struct avctp_server, 1);
