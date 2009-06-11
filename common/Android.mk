@@ -9,6 +9,7 @@ LOCAL_SRC_FILES:= \
 	sdp-xml.c \
 	textfile.c \
 	test_textfile.c \
+	android_bluez.c
 
 LOCAL_CFLAGS+= \
 	-O3 \

@@ -374,6 +374,13 @@ int main(int argc, char *argv[])
 	uint16_t mtu = 0;
 	GKeyFile *config;
 
+#ifdef ANDROID_SET_AID_AND_CAP
+	/* Unfortunately Android's init.rc does not yet support applying
+	 * capabilities. So we must do it in-process. */
+	void *android_set_aid_and_cap(void);
+	android_set_aid_and_cap();
+#endif
+
 	init_defaults();
 
 	context = g_option_context_new(NULL);
