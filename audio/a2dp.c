@@ -1452,7 +1452,7 @@ unsigned int a2dp_source_resume(struct avdtp *session, struct a2dp_sep *sep,
 			g_idle_add((GSourceFunc) finalize_resume, setup);
 		break;
 	default:
-		error("SEP in bad state");
+		error("SEP in bad state for resume");
 		goto failed;
 	}
 
@@ -1503,7 +1503,7 @@ unsigned int a2dp_source_suspend(struct avdtp *session, struct a2dp_sep *sep,
 		}
 		break;
 	default:
-		error("SEP in bad state for resume");
+		error("SEP in bad state for suspend");
 		goto failed;
 	}
 

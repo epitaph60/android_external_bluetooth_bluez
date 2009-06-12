@@ -125,6 +125,7 @@ struct pending_connect {
 	int err;
 	headset_state_t target_state;
 	GSList *callbacks;
+	uint16_t svclass;
 };
 
 struct headset {
@@ -440,6 +441,9 @@ static void pending_connect_finalize(struct audio_device *dev)
 
 	if (p == NULL)
 		return;
+
+	if (p->svclass)
+		bt_cancel_discovery(&dev->src, &dev->dst);
 
 	g_slist_foreach(p->callbacks, (GFunc) pending_connect_complete, dev);
 
@@ -1342,7 +1346,7 @@ failed:
 		headset_set_state(dev, HEADSET_STATE_DISCONNECTED);
 }
 
-static void headset_set_channel(struct headset *headset,
+static int headset_set_channel(struct headset *headset,
 				const sdp_record_t *record, uint16_t svc)
 {
 	int ch;
@@ -1350,7 +1354,7 @@ static void headset_set_channel(struct headset *headset,
 
 	if (sdp_get_access_protos(record, &protos) < 0) {
 		error("Unable to get access protos from headset record");
-		return;
+		return -1;
 	}
 
 	ch = sdp_get_proto_port(protos, RFCOMM_UUID);
@@ -1358,13 +1362,22 @@ static void headset_set_channel(struct headset *headset,
 	sdp_list_foreach(protos, (sdp_list_func_t) sdp_list_free, NULL);
 	sdp_list_free(protos, NULL);
 
-	if (ch > 0) {
-		headset->rfcomm_ch = ch;
-		debug("Discovered %s service on RFCOMM channel %d",
-			svc == HEADSET_SVCLASS_ID ? "Headset" : "Handsfree",
-			ch);
-	} else
+	if (ch <= 0) {
 		error("Unable to get RFCOMM channel from Headset record");
+		return -1;
+	}
+
+	headset->rfcomm_ch = ch;
+
+	if (svc == HANDSFREE_SVCLASS_ID) {
+		headset->hfp_handle = record->handle;
+		debug("Discovered Handsfree service on channel %d", ch);
+	} else {
+		headset->hsp_handle = record->handle;
+		debug("Discovered Headset service on channel %d", ch);
+	}
+
+	return 0;
 }
 
 static void get_record_cb(sdp_list_t *recs, int err, gpointer user_data)
@@ -1373,13 +1386,14 @@ static void get_record_cb(sdp_list_t *recs, int err, gpointer user_data)
 	struct headset *hs = dev->headset;
 	struct pending_connect *p = hs->pending;
 	sdp_record_t *record = NULL;
-	sdp_list_t *classes = NULL;
-	uuid_t uuid;
+	sdp_list_t *r;
 
 	if (err < 0) {
-		error("Unable to get service record: %s (%d)", strerror(-err),
-			-err);
-		goto failed_not_supported;
+		error("Unable to get service record: %s (%d)",
+							strerror(-err), -err);
+		p->err = -err;
+		error_connection_attempt_failed(dev->conn, p->msg, p->err);
+		goto failed;
 	}
 
 	if (!recs || !recs->data) {
@@ -1387,40 +1401,43 @@ static void get_record_cb(sdp_list_t *recs, int err, gpointer user_data)
 		goto failed_not_supported;
 	}
 
-	record = recs->data;
+	for (r = recs; r != NULL; r = r->next) {
+		sdp_list_t *classes;
+		uuid_t uuid;
 
-	if (sdp_get_service_classes(record, &classes) < 0) {
-		error("Unable to get service classes from record");
+		record = r->data;
+
+		if (sdp_get_service_classes(record, &classes) < 0) {
+			error("Unable to get service classes from record");
+			continue;
+		}
+
+		memcpy(&uuid, classes->data, sizeof(uuid));
+
+		sdp_list_free(classes, free);
+
+		if (!sdp_uuid128_to_uuid(&uuid) || uuid.type != SDP_UUID16) {
+			error("Not a 16 bit UUID");
+			continue;
+		}
+
+		if (uuid.value.uuid16 == p->svclass)
+			break;
+	}
+
+	if (r == NULL) {
+		error("No record found with UUID 0x%04x", p->svclass);
 		goto failed_not_supported;
 	}
 
-	memcpy(&uuid, classes->data, sizeof(uuid));
-
-	if (!sdp_uuid128_to_uuid(&uuid) || uuid.type != SDP_UUID16) {
-		error("Not a 16 bit UUID");
-		goto failed_not_supported;
-	}
-
-	if (hs->search_hfp) {
-		if (uuid.value.uuid16 != HANDSFREE_SVCLASS_ID) {
-			error("Service record didn't contain the HFP UUID");
-			goto failed_not_supported;
-		}
-		hs->hfp_handle = record->handle;
-	} else {
-		if (uuid.value.uuid16 != HEADSET_SVCLASS_ID) {
-			error("Service record didn't contain the HSP UUID");
-			goto failed_not_supported;
-		}
-		hs->hsp_handle = record->handle;
-	}
-
-	headset_set_channel(hs, record, uuid.value.uuid16);
-
-	if (hs->rfcomm_ch == -1) {
+	if (headset_set_channel(hs, record, p->svclass) < 0) {
 		error("Unable to extract RFCOMM channel from service record");
 		goto failed_not_supported;
 	}
+
+	/* Set svclass to 0 so we can easily check that SDP is no-longer
+	 * going on (to know if bt_cancel_discovery needs to be called) */
+	p->svclass = 0;
 
 	err = rfcomm_connect(dev, NULL, NULL, NULL);
 	if (err < 0) {
@@ -1430,16 +1447,15 @@ static void get_record_cb(sdp_list_t *recs, int err, gpointer user_data)
 		goto failed;
 	}
 
-	sdp_list_free(classes, free);
-
 	return;
 
 failed_not_supported:
+	if (p->svclass == HANDSFREE_SVCLASS_ID &&
+			get_records(dev, NULL, NULL, NULL) == 0)
+		return;
 	if (p->msg)
 		error_not_supported(dev->conn, p->msg);
 failed:
-	if (classes)
-		sdp_list_free(classes, free);
 	pending_connect_finalize(dev);
 	headset_set_state(dev, HEADSET_STATE_DISCONNECTED);
 }
@@ -1448,14 +1464,33 @@ static int get_records(struct audio_device *device, headset_stream_cb_t cb,
 			void *user_data, unsigned int *cb_id)
 {
 	struct headset *hs = device->headset;
+	uint16_t svclass;
 	uuid_t uuid;
+	int err;
 
-	sdp_uuid16_create(&uuid, hs->search_hfp ? HANDSFREE_SVCLASS_ID :
-				HEADSET_SVCLASS_ID);
+	if (hs->pending && hs->pending->svclass == HANDSFREE_SVCLASS_ID)
+		svclass = HEADSET_SVCLASS_ID;
+	else
+		svclass = hs->search_hfp ? HANDSFREE_SVCLASS_ID :
+							HEADSET_SVCLASS_ID;
+
+	sdp_uuid16_create(&uuid, svclass);
+
+	err = bt_search_service(&device->src, &device->dst, &uuid,
+						get_record_cb, device, NULL);
+	if (err < 0)
+		return err;
+
+	if (hs->pending) {
+		hs->pending->svclass = svclass;
+		return 0;
+	}
 
 	headset_set_state(device, HEADSET_STATE_CONNECT_IN_PROGRESS);
 
 	pending_connect_init(hs, HEADSET_STATE_CONNECTED);
+
+	hs->pending->svclass = svclass;
 
 	if (cb) {
 		unsigned int id;
@@ -1465,8 +1500,7 @@ static int get_records(struct audio_device *device, headset_stream_cb_t cb,
 			*cb_id = id;
 	}
 
-	return bt_search_service(&device->src, &device->dst, &uuid,
-			get_record_cb, device, NULL);
+	return 0;
 }
 
 static int rfcomm_connect(struct audio_device *dev, headset_stream_cb_t cb,
@@ -1476,6 +1510,9 @@ static int rfcomm_connect(struct audio_device *dev, headset_stream_cb_t cb,
 	char address[18];
 	GError *err = NULL;
 	GIOChannel *io;
+
+	if (!manager_allow_headset_connection(dev))
+		return -ECONNREFUSED;
 
 	if (hs->rfcomm_ch < 0)
 		return get_records(dev, cb, user_data, cb_id);
@@ -1618,14 +1655,13 @@ static DBusMessage *hs_connect(DBusConnection *conn, DBusMessage *msg,
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".NotReady",
 					"Telephony subsystem not ready");
 
-	if (!manager_allow_headset_connection(&device->src))
-		return g_dbus_create_error(msg, ERROR_INTERFACE ".NotAllowed",
-						"Too many connected devices");
-
 	device->auto_connect = FALSE;
 
 	err = rfcomm_connect(device, NULL, NULL, NULL);
-	if (err < 0)
+	if (err == -ECONNREFUSED)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".NotAllowed",
+						"Too many connected devices");
+	else if (err < 0)
 		return g_dbus_create_error(msg, ERROR_INTERFACE
 						".ConnectAttemptFailed",
 						"Connect Attempt Failed");
@@ -2081,7 +2117,8 @@ static void path_unregister(void *data)
 
 	if (hs->state > HEADSET_STATE_DISCONNECTED) {
 		debug("Headset unregistered while device was connected!");
-		bt_cancel_discovery(&dev->src, &dev->dst);
+		if (hs->pending)
+			pending_connect_finalize(dev);
 		headset_set_state(dev, HEADSET_STATE_DISCONNECTED);
 	}
 
