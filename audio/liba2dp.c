@@ -188,9 +188,9 @@ static int bluetooth_start(struct bluetooth_data *data)
 	data->state = A2DP_STATE_STARTING;
 	/* send start */
 	memset(start_req, 0, BT_SUGGESTED_BUFFER_SIZE);
-        start_req->h.type = BT_REQUEST;
-        start_req->h.name = BT_START_STREAM;
-        start_req->h.length = sizeof(*start_req);
+	start_req->h.type = BT_REQUEST;
+	start_req->h.name = BT_START_STREAM;
+	start_req->h.length = sizeof(*start_req);
 
 
 	err = audioservice_send(data, &start_req->h);
@@ -202,7 +202,7 @@ static int bluetooth_start(struct bluetooth_data *data)
 	if (err < 0)
 		goto error;
 
-        streamfd_ind->h.length = sizeof(*streamfd_ind);
+	streamfd_ind->h.length = sizeof(*streamfd_ind);
 	err = audioservice_expect(data, &streamfd_ind->h, BT_NEW_STREAM);
 	if (err < 0)
 		goto error;
@@ -255,9 +255,9 @@ static int bluetooth_stop(struct bluetooth_data *data)
 
 	/* send stop request */
 	memset(stop_req, 0, BT_SUGGESTED_BUFFER_SIZE);
-        stop_req->h.type = BT_REQUEST;
-        stop_req->h.name = BT_STOP_STREAM;
-        stop_req->h.length = sizeof(*stop_req);
+	stop_req->h.type = BT_REQUEST;
+	stop_req->h.name = BT_STOP_STREAM;
+	stop_req->h.length = sizeof(*stop_req);
 
 	err = audioservice_send(data, &stop_req->h);
 	if (err < 0)
@@ -462,34 +462,34 @@ static int bluetooth_a2dp_hw_params(struct bluetooth_data *data)
 	struct bt_set_configuration_rsp *setconf_rsp = (void*) buf;
 	int err;
 
-        memset(open_req, 0, BT_SUGGESTED_BUFFER_SIZE);
+	memset(open_req, 0, BT_SUGGESTED_BUFFER_SIZE);
 	open_req->h.type = BT_REQUEST;
 	open_req->h.name = BT_OPEN;
 	open_req->h.length = sizeof(*open_req);
 	strncpy(open_req->destination, data->address, 18);
-        open_req->seid = data->sbc_capabilities.capability.seid;
+	open_req->seid = data->sbc_capabilities.capability.seid;
 	open_req->lock = BT_WRITE_LOCK;
 
-        err = audioservice_send(data, &open_req->h);
-        if (err < 0)
-                return err;
+	err = audioservice_send(data, &open_req->h);
+	if (err < 0)
+		return err;
 
-        open_rsp->h.length = sizeof(*open_rsp);
-        err = audioservice_expect(data, &open_rsp->h, BT_OPEN);
-        if (err < 0)
-                return err;
+	open_rsp->h.length = sizeof(*open_rsp);
+	err = audioservice_expect(data, &open_rsp->h, BT_OPEN);
+	if (err < 0)
+		return err;
 
-        err = bluetooth_a2dp_init(data);
-        if (err < 0)
-                return err;
+	err = bluetooth_a2dp_init(data);
+	if (err < 0)
+		return err;
 
 
 	memset(setconf_req, 0, BT_SUGGESTED_BUFFER_SIZE);
 	setconf_req->h.type = BT_REQUEST;
 	setconf_req->h.name = BT_SET_CONFIGURATION;
-        setconf_req->h.length = sizeof(*setconf_req);
-        memcpy(&setconf_req->codec, &data->sbc_capabilities,
-			                        sizeof(data->sbc_capabilities));
+	setconf_req->h.length = sizeof(*setconf_req);
+	memcpy(&setconf_req->codec, &data->sbc_capabilities,
+						sizeof(data->sbc_capabilities));
 
 	setconf_req->codec.transport = BT_CAPABILITIES_TRANSPORT_A2DP;
 	setconf_req->codec.length = sizeof(data->sbc_capabilities);
@@ -692,7 +692,7 @@ static int audioservice_send(struct bluetooth_data *data,
 	int err;
 	uint16_t length;
 
-        length = msg->length ? msg->length : BT_SUGGESTED_BUFFER_SIZE;
+	length = msg->length ? msg->length : BT_SUGGESTED_BUFFER_SIZE;
 
 	VDBG("sending %s", bt_audio_strmsg(msg->msg_type));
 	if (send(data->server.fd, msg, length,
@@ -714,63 +714,63 @@ static int audioservice_recv(struct bluetooth_data *data,
 {
 	int err, ret;
 	const char *type, *name;
-        uint16_t length;
+	uint16_t length;
 
-        length = inmsg->length ? inmsg->length : BT_SUGGESTED_BUFFER_SIZE;
+	length = BT_SUGGESTED_BUFFER_SIZE;
 
 	ret = recv(data->server.fd, inmsg, length, 0);
-        if (ret < 0) {
-                err = -errno;
-                ERR("Error receiving IPC data from bluetoothd: %s (%d)",
-                                                strerror(errno), errno);
+	if (ret < 0) {
+		err = -errno;
+		ERR("Error receiving IPC data from bluetoothd: %s (%d)",
+						strerror(errno), errno);
 		if (err == -EPIPE)
 			bluetooth_close(data);
-        } else if ((size_t) ret < sizeof(bt_audio_msg_header_t)) {
-                ERR("Too short (%d bytes) IPC packet from bluetoothd", ret);
-                err = -EINVAL;
-        } else {
-                type = bt_audio_strtype(inmsg->type);
-                name = bt_audio_strname(inmsg->name);
-                if (type && name) {
-                        DBG("Received %s - %s", type, name);
-                        err = 0;
-                } else {
-                        err = -EINVAL;
-                        ERR("Bogus message type %d - name %d"
-                                        " received from audio service",
-                                        inmsg->type, inmsg->name);
-                }
+	} else if ((size_t) ret < sizeof(bt_audio_msg_header_t)) {
+		ERR("Too short (%d bytes) IPC packet from bluetoothd", ret);
+		err = -EINVAL;
+	} else {
+		type = bt_audio_strtype(inmsg->type);
+		name = bt_audio_strname(inmsg->name);
+		if (type && name) {
+			DBG("Received %s - %s", type, name);
+			err = 0;
+		} else {
+			err = -EINVAL;
+			ERR("Bogus message type %d - name %d"
+					" received from audio service",
+					inmsg->type, inmsg->name);
+		}
 
-        }
+	}
 	return err;
 }
 
 static int audioservice_expect(struct bluetooth_data *data,
 		bt_audio_msg_header_t *rsp_hdr, int expected_name)
 {
-        bt_audio_error_t *error;
-        int err = audioservice_recv(data, rsp_hdr);
+	bt_audio_error_t *error;
+	int err = audioservice_recv(data, rsp_hdr);
 
-        if (err != 0)
-                return err;
+	if (err != 0)
+		return err;
 
-        if (rsp_hdr->name != expected_name) {
-                err = -EINVAL;
-                ERR("Bogus message %s received while %s was expected",
-                                bt_audio_strname(rsp_hdr->name),
-                                bt_audio_strname(expected_name));
-        }
+	if (rsp_hdr->name != expected_name) {
+		err = -EINVAL;
+		ERR("Bogus message %s received while %s was expected",
+				bt_audio_strname(rsp_hdr->name),
+				bt_audio_strname(expected_name));
+	}
 
-        if (rsp_hdr->type == BT_ERROR) {
-                error = (void *) rsp_hdr;
-                ERR("%s failed : %s(%d)",
-                                        bt_audio_strname(rsp_hdr->name),
-                                        strerror(error->posix_errno),
-                                        error->posix_errno);
-                return -error->posix_errno;
-        }
+	if (rsp_hdr->type == BT_ERROR) {
+		error = (void *) rsp_hdr;
+		ERR("%s failed : %s(%d)",
+					bt_audio_strname(rsp_hdr->name),
+					strerror(error->posix_errno),
+					error->posix_errno);
+		return -error->posix_errno;
+	}
 
-        return err;
+	return err;
 
 }
 
@@ -794,29 +794,29 @@ static int bluetooth_init(struct bluetooth_data *data)
 }
 
 static int bluetooth_parse_capabilities(struct bluetooth_data *data,
-                                        struct bt_get_capabilities_rsp *rsp)
+					struct bt_get_capabilities_rsp *rsp)
 {
-        int bytes_left = rsp->h.length - sizeof(*rsp);
-        codec_capabilities_t *codec = (void *) rsp->data;
+	int bytes_left = rsp->h.length - sizeof(*rsp);
+	codec_capabilities_t *codec = (void *) rsp->data;
 
-        if (codec->transport != BT_CAPABILITIES_TRANSPORT_A2DP)
-                return 0;
+	if (codec->transport != BT_CAPABILITIES_TRANSPORT_A2DP)
+		return 0;
 
-        while (bytes_left > 0) {
-                if ((codec->type == BT_A2DP_SBC_SINK) &&
-                                !(codec->lock & BT_WRITE_LOCK))
-                        break;
+	while (bytes_left > 0) {
+		if ((codec->type == BT_A2DP_SBC_SINK) &&
+				!(codec->lock & BT_WRITE_LOCK))
+			break;
 
-                bytes_left -= codec->length;
-                codec = (void *) codec + codec->length;
-        }
+		bytes_left -= codec->length;
+		codec = (void *) codec + codec->length;
+	}
 
-        if (bytes_left <= 0 ||
-                        codec->length != sizeof(data->sbc_capabilities))
-                return -EINVAL;
+	if (bytes_left <= 0 ||
+			codec->length != sizeof(data->sbc_capabilities))
+		return -EINVAL;
 
-        memcpy(&data->sbc_capabilities, codec, codec->length);
-        return 0;
+	memcpy(&data->sbc_capabilities, codec, codec->length);
+	return 0;
 }
 
 
