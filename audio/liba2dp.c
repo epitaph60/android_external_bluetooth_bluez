@@ -716,7 +716,7 @@ static int audioservice_recv(struct bluetooth_data *data,
 	const char *type, *name;
 	uint16_t length;
 
-	length = BT_SUGGESTED_BUFFER_SIZE;
+	length = inmsg->length ? inmsg->length : BT_SUGGESTED_BUFFER_SIZE;
 
 	ret = recv(data->server.fd, inmsg, length, 0);
 	if (ret < 0) {
@@ -728,6 +728,23 @@ static int audioservice_recv(struct bluetooth_data *data,
 	} else if ((size_t) ret < sizeof(bt_audio_msg_header_t)) {
 		ERR("Too short (%d bytes) IPC packet from bluetoothd", ret);
 		err = -EINVAL;
+	} else if (inmsg->type == BT_ERROR) {
+		bt_audio_error_t *error = (bt_audio_error_t *)inmsg;
+		ret = recv(data->server.fd, &error->posix_errno,
+				sizeof(error->posix_errno), 0);
+		if (ret < 0) {
+			err = -errno;
+			ERR("Error receiving error code for BT_ERROR: %s (%d)",
+						strerror(errno), errno);
+			if (err == -EPIPE)
+				bluetooth_close(data);
+		} else {
+			ERR("%s failed : %s(%d)",
+					bt_audio_strname(error->h.name),
+					strerror(error->posix_errno),
+					error->posix_errno);
+			err = -error->posix_errno;
+		}
 	} else {
 		type = bt_audio_strtype(inmsg->type);
 		name = bt_audio_strname(inmsg->name);
@@ -748,7 +765,6 @@ static int audioservice_recv(struct bluetooth_data *data,
 static int audioservice_expect(struct bluetooth_data *data,
 		bt_audio_msg_header_t *rsp_hdr, int expected_name)
 {
-	bt_audio_error_t *error;
 	int err = audioservice_recv(data, rsp_hdr);
 
 	if (err != 0)
@@ -760,16 +776,6 @@ static int audioservice_expect(struct bluetooth_data *data,
 				bt_audio_strname(rsp_hdr->name),
 				bt_audio_strname(expected_name));
 	}
-
-	if (rsp_hdr->type == BT_ERROR) {
-		error = (void *) rsp_hdr;
-		ERR("%s failed : %s(%d)",
-					bt_audio_strname(rsp_hdr->name),
-					strerror(error->posix_errno),
-					error->posix_errno);
-		return -error->posix_errno;
-	}
-
 	return err;
 
 }
