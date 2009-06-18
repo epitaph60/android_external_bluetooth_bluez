@@ -721,7 +721,7 @@ static DBusMessage *get_service_attribute_value_reply(DBusMessage *msg, DBusConn
 
 	reply = dbus_message_new_method_return(msg);
 	if (!reply)
-		return;
+		return NULL;
 	sdp_data_t *curr;
 	sdp_list_t *ap = 0;
 	for (; attr; attr = attr->next) {
