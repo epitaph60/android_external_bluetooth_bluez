@@ -4,7 +4,7 @@
  *
  *  Copyright (C) 2006-2007  Nokia Corporation
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
- *
+ *  Copyright (C) 2009-2010  Motorola Inc.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -641,6 +641,74 @@ static DBusMessage *sink_disconnect(DBusConnection *conn,
 	return NULL;
 }
 
+static DBusMessage *sink_suspend(DBusConnection *conn,
+					DBusMessage *msg, void *data)
+{
+	struct audio_device *device = data;
+	struct sink *sink = device->sink;
+	struct pending_request *pending;
+	int err;
+
+	if (!sink->session)
+		return g_dbus_create_error(msg, ERROR_INTERFACE
+						".NotConnected",
+						"Device not Connected");
+
+	if (sink->connect || sink->disconnect)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
+						"%s", strerror(EBUSY));
+
+	if (sink->state < AVDTP_STATE_OPEN) {
+		DBusMessage *reply = dbus_message_new_method_return(msg);
+		if (!reply)
+			return NULL;
+		avdtp_unref(sink->session);
+		sink->session = NULL;
+		return reply;
+	}
+
+	err = avdtp_suspend(sink->session, sink->stream);
+	if (err < 0)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
+						"%s", strerror(-err));
+
+	return NULL;
+}
+
+static DBusMessage *sink_resume(DBusConnection *conn,
+					DBusMessage *msg, void *data)
+{
+	struct audio_device *device = data;
+	struct sink *sink = device->sink;
+	struct pending_request *pending;
+	int err;
+
+	if (!sink->session)
+		return g_dbus_create_error(msg, ERROR_INTERFACE
+						".NotConnected",
+						"Device not Connected");
+
+	if (sink->connect || sink->disconnect)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
+						"%s", strerror(EBUSY));
+
+	if (sink->state < AVDTP_STATE_OPEN) {
+		DBusMessage *reply = dbus_message_new_method_return(msg);
+		if (!reply)
+			return NULL;
+		avdtp_unref(sink->session);
+		sink->session = NULL;
+		return reply;
+	}
+
+	err = avdtp_start(sink->session, sink->stream);
+	if (err < 0)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
+						"%s", strerror(-err));
+
+	return NULL;
+}
+
 static DBusMessage *sink_is_connected(DBusConnection *conn,
 					DBusMessage *msg,
 					void *data)
@@ -707,6 +775,10 @@ static GDBusMethodTable sink_methods[] = {
 						G_DBUS_METHOD_FLAG_ASYNC },
 	{ "Disconnect",		"",	"",	sink_disconnect,
 						G_DBUS_METHOD_FLAG_ASYNC },
+	{ "Suspend",        "", "", sink_suspend,
+                        G_DBUS_METHOD_FLAG_ASYNC },
+	{ "Resume",         "", "", sink_resume,
+                        G_DBUS_METHOD_FLAG_ASYNC },
 	{ "IsConnected",	"",	"b",	sink_is_connected,
 						G_DBUS_METHOD_FLAG_DEPRECATED },
 	{ "GetProperties",	"",	"a{sv}",sink_get_properties },
