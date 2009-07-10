@@ -101,6 +101,7 @@ typedef enum {
 
 typedef enum {
 	A2DP_CMD_NONE = 0,
+	A2DP_CMD_INIT,
 	A2DP_CMD_CONFIGURE,
 	A2DP_CMD_START,
 	A2DP_CMD_STOP,
@@ -911,7 +912,7 @@ static int wait_for_start(struct bluetooth_data *data, int timeout)
 
 	while (state != A2DP_STATE_STARTED && !err) {
 		if (state == A2DP_STATE_NONE)
-			return -ENODEV;
+			set_command(data, A2DP_CMD_INIT);
 		else if (state == A2DP_STATE_INITIALIZED)
 			set_command(data, A2DP_CMD_CONFIGURE);
 		else if (state == A2DP_STATE_CONFIGURED)
@@ -949,10 +950,12 @@ static void* a2dp_thread(void *d)
 		command = data->command;
 		pthread_mutex_unlock(&data->mutex);
 
-		if (data->state == A2DP_STATE_NONE && command != A2DP_CMD_QUIT)
-			bluetooth_init(data);
-
 		switch (command) {
+			case A2DP_CMD_INIT:
+				if (data->state != A2DP_STATE_NONE)
+					break;
+				bluetooth_init(data);
+				break;
 			case A2DP_CMD_CONFIGURE:
 				if (data->state != A2DP_STATE_INITIALIZED)
 					break;
@@ -1032,8 +1035,7 @@ void a2dp_set_sink(a2dpData d, const char* address)
 	struct bluetooth_data* data = (struct bluetooth_data*)d;
 	if (strncmp(data->address, address, 18)) {
 		strncpy(data->address, address, 18);
-		// force reconfiguration
-		set_command(data, A2DP_CMD_CONFIGURE);
+		set_command(data, A2DP_CMD_INIT);
 	}
 }
 
