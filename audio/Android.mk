@@ -56,7 +56,8 @@ LOCAL_SRC_FILES:= \
 	liba2dp.c \
 	ipc.c \
 	../sbc/sbc.c.arm \
-	../sbc/sbc_primitives.c
+	../sbc/sbc_primitives.c \
+	../sbc/sbc_primitives_neon.c
 
 # to improve SBC performance
 LOCAL_CFLAGS:= -funroll-loops
