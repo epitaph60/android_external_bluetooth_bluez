@@ -65,6 +65,7 @@
 #include "headset.h"
 #include "gateway.h"
 #include "sink.h"
+#include "source.h"
 #include "control.h"
 #include "manager.h"
 #include "sdpd.h"
@@ -135,13 +136,15 @@ gboolean server_is_enabled(bdaddr_t *src, uint16_t svc)
 	case HEADSET_SVCLASS_ID:
 		return enabled.headset;
 	case HEADSET_AGW_SVCLASS_ID:
-		return  FALSE;
+		return FALSE;
 	case HANDSFREE_SVCLASS_ID:
 		return enabled.headset && enabled.hfp;
 	case HANDSFREE_AGW_SVCLASS_ID:
 		return enabled.gateway;
 	case AUDIO_SINK_SVCLASS_ID:
 		return enabled.sink;
+	case AUDIO_SOURCE_SVCLASS_ID:
+		return enabled.source;
 	case AV_REMOTE_TARGET_SVCLASS_ID:
 	case AV_REMOTE_SVCLASS_ID:
 		return enabled.control;
@@ -205,6 +208,8 @@ static void handle_uuid(const char *uuidstr, struct audio_device *device)
 		break;
 	case AUDIO_SOURCE_SVCLASS_ID:
 		debug("Found Audio Source");
+		if (device->source == NULL)
+			device->source = source_init(device);
 		break;
 	case AV_REMOTE_SVCLASS_ID:
 	case AV_REMOTE_TARGET_SVCLASS_ID:
@@ -482,8 +487,8 @@ static void ag_confirm(GIOChannel *chan, gpointer data)
 
 	headset_set_state(device, HEADSET_STATE_CONNECT_IN_PROGRESS);
 
-	perr = btd_request_authorization(&device->src, &device->dst,
-					server_uuid, headset_auth_cb, device);
+	perr = audio_device_request_authorization(device, server_uuid,
+						headset_auth_cb, device);
 	if (perr < 0) {
 		debug("Authorization denied: %s", strerror(-perr));
 		headset_set_state(device, HEADSET_STATE_DISCONNECTED);
@@ -561,8 +566,8 @@ static void hf_io_cb(GIOChannel *chan, gpointer data)
 		goto drop;
 	}
 
-	perr = btd_request_authorization(&device->src, &device->dst,
-				server_uuid, gateway_auth_cb, device);
+	perr = audio_device_request_authorization(device, server_uuid,
+						gateway_auth_cb, device);
 	if (perr < 0) {
 		debug("Authorization denied!");
 		goto drop;
@@ -571,7 +576,7 @@ static void hf_io_cb(GIOChannel *chan, gpointer data)
 	return;
 
 drop:
-	g_io_channel_close(chan);
+	g_io_channel_shutdown(chan, TRUE, NULL);
 	g_io_channel_unref(chan);
 	return;
 }

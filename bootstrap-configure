@@ -10,7 +10,6 @@ fi
 
 ./bootstrap && \
     ./configure --enable-maintainer-mode \
-		--enable-gtk-doc \
 		--enable-debug \
 		--prefix=/usr \
 		--mandir=/usr/share/man \
@@ -27,7 +26,7 @@ fi
 		--enable-dund \
 		--enable-test \
 		--enable-cups \
+		--disable-pcmcia \
 		--disable-manpages \
-		--disable-configfiles \
-		--disable-initscripts \
-		--disable-pcmciarules $*
+		--disable-udevrules \
+		--disable-configfiles $*

@@ -131,6 +131,7 @@ struct indicator {
 	const char *desc;
 	const char *range;
 	int val;
+	gboolean ignore_redundant;
 };
 
 /* Notify telephony-*.c of connected/disconnected devices. Implemented by
@@ -205,6 +206,11 @@ static inline int telephony_update_indicator(struct indicator *indicators,
 		return -ENOENT;
 
 	debug("Telephony indicator \"%s\" %d->%d", desc, ind->val, new_val);
+
+	if (ind->ignore_redundant && ind->val == new_val) {
+		debug("Ignoring no-change indication");
+		return 0;
+	}
 
 	ind->val = new_val;
 

@@ -53,6 +53,8 @@
 #define SDPINF(fmt, arg...) syslog(LOG_INFO, fmt "\n", ## arg)
 #define SDPERR(fmt, arg...) syslog(LOG_ERR, "%s: " fmt "\n", __func__ , ## arg)
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
 #ifdef SDP_DEBUG
 #define SDPDBG(fmt, arg...) syslog(LOG_DEBUG, "%s: " fmt "\n", __func__ , ## arg)
 #else
@@ -2236,7 +2238,7 @@ static sdp_data_t *access_proto_to_dataseq(sdp_record_t *rec, sdp_list_t *proto)
 		sdp_data_t *s;
 		uuid_t *uuid = NULL;
 		unsigned int pslen = 0;
-		for (; elt && pslen < sizeof(dtds); elt = elt->next, pslen++) {
+		for (; elt && pslen < ARRAY_SIZE(dtds); elt = elt->next, pslen++) {
 			sdp_data_t *d = (sdp_data_t *)elt->data;
 			dtds[pslen] = &d->dtd;
 			switch (d->dtd) {
@@ -3153,7 +3155,15 @@ static int gen_dataseq_pdu(uint8_t *dst, const sdp_list_t *seq, uint8_t dtd)
 	SDPDBG("Seq length : %d\n", seqlen);
 
 	types = malloc(seqlen * sizeof(void *));
+	if (!types)
+		return -ENOMEM;
+
 	values = malloc(seqlen * sizeof(void *));
+	if (!values) {
+		free(types);
+		return -ENOMEM;
+	}
+
 	for (i = 0; i < seqlen; i++) {
 		void *data = seq->data;
 		types[i] = &dtd;
@@ -3164,12 +3174,22 @@ static int gen_dataseq_pdu(uint8_t *dst, const sdp_list_t *seq, uint8_t dtd)
 	}
 
 	dataseq = sdp_seq_alloc(types, values, seqlen);
+	if (!dataseq) {
+		free(types);
+		free(values);
+		return -ENOMEM;
+	}
+
 	memset(&buf, 0, sizeof(sdp_buf_t));
 	sdp_gen_buffer(&buf, dataseq);
 	buf.data = malloc(buf.buf_size);
 
-	if (!buf.data)
+	if (!buf.data) {
+		sdp_data_free(dataseq);
+		free(types);
+		free(values);
 		return -ENOMEM;
+	}
 
 	SDPDBG("Data Seq : 0x%p\n", seq);
 	seqlen = sdp_gen_pdu(&buf, dataseq);

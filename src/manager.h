@@ -22,6 +22,9 @@
  *
  */
 
+#include <bluetooth/bluetooth.h>
+#include <dbus/dbus.h>
+
 #define MANAGER_INTERFACE "org.bluez.Manager"
 
 dbus_bool_t manager_init(DBusConnection *conn, const char *path);
@@ -40,7 +43,6 @@ int manager_stop_adapter(int id);
 void manager_add_adapter(const char *path);
 int manager_get_default_adapter();
 void manager_set_default_adapter(int id);
-int manager_update_adapter(uint16_t id, uint8_t svc);
-int manager_startup_complete(void);
+void manager_update_svc(const bdaddr_t *bdaddr, uint8_t svc);
 int manager_get_adapter_class(uint16_t dev_id, uint8_t *cls);
-
+void btd_manager_set_offline(gboolean offline);

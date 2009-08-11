@@ -4,6 +4,7 @@
  *
  *  Copyright (C) 2006-2007  Nokia Corporation
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright (C) 2009  Joao Paulo Rechi Vita
  *
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -42,7 +43,7 @@
 #include "avdtp.h"
 #include "a2dp.h"
 #include "error.h"
-#include "sink.h"
+#include "source.h"
 #include "dbus-common.h"
 #include "../src/adapter.h"
 #include "../src/device.h"
@@ -55,7 +56,7 @@ struct pending_request {
 	unsigned int id;
 };
 
-struct sink {
+struct source {
 	struct audio_device *dev;
 	struct avdtp *session;
 	struct avdtp_stream *stream;
@@ -64,56 +65,56 @@ struct sink {
 	guint retry_id;
 	avdtp_session_state_t session_state;
 	avdtp_state_t stream_state;
-	sink_state_t state;
+	source_state_t state;
 	struct pending_request *connect;
 	struct pending_request *disconnect;
 	DBusConnection *conn;
 };
 
-struct sink_state_callback {
-	sink_state_cb cb;
+struct source_state_callback {
+	source_state_cb cb;
 	void *user_data;
 	unsigned int id;
 };
 
-static GSList *sink_callbacks = NULL;
+static GSList *source_callbacks = NULL;
 
 static unsigned int avdtp_callback_id = 0;
 
-static const char *state2str(sink_state_t state)
+static const char *state2str(source_state_t state)
 {
 	switch (state) {
-	case SINK_STATE_DISCONNECTED:
+	case SOURCE_STATE_DISCONNECTED:
 		return "disconnected";
-	case SINK_STATE_CONNECTING:
+	case SOURCE_STATE_CONNECTING:
 		return "connecting";
-	case SINK_STATE_CONNECTED:
+	case SOURCE_STATE_CONNECTED:
 		return "connected";
-	case SINK_STATE_PLAYING:
+	case SOURCE_STATE_PLAYING:
 		return "playing";
 	default:
-		error("Invalid sink state %d", state);
+		error("Invalid source state %d", state);
 		return NULL;
 	}
 }
 
-static void sink_set_state(struct audio_device *dev, sink_state_t new_state)
+static void source_set_state(struct audio_device *dev, source_state_t new_state)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 	const char *state_str;
-	sink_state_t old_state = sink->state;
+	source_state_t old_state = source->state;
 	GSList *l;
 
-	sink->state = new_state;
+	source->state = new_state;
 
 	state_str = state2str(new_state);
 	if (state_str)
 		emit_property_changed(dev->conn, dev->path,
-					AUDIO_SINK_INTERFACE, "State",
+					AUDIO_SOURCE_INTERFACE, "State",
 					DBUS_TYPE_STRING, &state_str);
 
-	for (l = sink_callbacks; l != NULL; l = l->next) {
-		struct sink_state_callback *cb = l->data;
+	for (l = source_callbacks; l != NULL; l = l->next) {
+		struct source_state_callback *cb = l->data;
 		cb->cb(dev, old_state, new_state, cb->user_data);
 	}
 }
@@ -124,37 +125,29 @@ static void avdtp_state_callback(struct audio_device *dev,
 					avdtp_session_state_t new_state,
 					void *user_data)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 
-	if (sink == NULL)
+	if (source == NULL)
 		return;
 
 	switch (new_state) {
 	case AVDTP_SESSION_STATE_DISCONNECTED:
-		if (sink->state != SINK_STATE_CONNECTING) {
-			gboolean value = FALSE;
-			g_dbus_emit_signal(dev->conn, dev->path,
-					AUDIO_SINK_INTERFACE, "Disconnected",
-					DBUS_TYPE_INVALID);
-			emit_property_changed(dev->conn, dev->path,
-					AUDIO_SINK_INTERFACE, "Connected",
-					DBUS_TYPE_BOOLEAN, &value);
-			if (sink->dc_id) {
-				device_remove_disconnect_watch(dev->btd_dev,
-								sink->dc_id);
-				sink->dc_id = 0;
-			}
+		if (source->state != SOURCE_STATE_CONNECTING &&
+				source->dc_id) {
+			device_remove_disconnect_watch(dev->btd_dev,
+							source->dc_id);
+			source->dc_id = 0;
 		}
-		sink_set_state(dev, SINK_STATE_DISCONNECTED);
+		source_set_state(dev, SOURCE_STATE_DISCONNECTED);
 		break;
 	case AVDTP_SESSION_STATE_CONNECTING:
-		sink_set_state(dev, SINK_STATE_CONNECTING);
+		source_set_state(dev, SOURCE_STATE_CONNECTING);
 		break;
 	case AVDTP_SESSION_STATE_CONNECTED:
 		break;
 	}
 
-	sink->session_state = new_state;
+	source->session_state = new_state;
 }
 
 static void pending_request_free(struct audio_device *dev,
@@ -174,11 +167,11 @@ static void disconnect_cb(struct btd_device *btd_dev, gboolean removal,
 				void *user_data)
 {
 	struct audio_device *device = user_data;
-	struct sink *sink = device->sink;
+	struct source *source = device->source;
 
-	debug("Sink: disconnect %s", device->path);
+	debug("Source: disconnect %s", device->path);
 
-	avdtp_close(sink->session, sink->stream);
+	avdtp_close(source->session, source->stream);
 }
 
 static void stream_state_changed(struct avdtp_stream *stream,
@@ -188,75 +181,49 @@ static void stream_state_changed(struct avdtp_stream *stream,
 					void *user_data)
 {
 	struct audio_device *dev = user_data;
-	struct sink *sink = dev->sink;
-	gboolean value;
+	struct source *source = dev->source;
 
 	if (err)
 		return;
 
 	switch (new_state) {
 	case AVDTP_STATE_IDLE:
-		if (sink->disconnect) {
+		if (source->disconnect) {
 			DBusMessage *reply;
 			struct pending_request *p;
 
-			p = sink->disconnect;
-			sink->disconnect = NULL;
+			p = source->disconnect;
+			source->disconnect = NULL;
 
 			reply = dbus_message_new_method_return(p->msg);
 			g_dbus_send_message(p->conn, reply);
 			pending_request_free(dev, p);
 		}
 
-		if (sink->dc_id) {
+		if (source->dc_id) {
 			device_remove_disconnect_watch(dev->btd_dev,
-							sink->dc_id);
-			sink->dc_id = 0;
+							source->dc_id);
+			source->dc_id = 0;
 		}
 
-		if (sink->session) {
-			avdtp_unref(sink->session);
-			sink->session = NULL;
+		if (source->session) {
+			avdtp_unref(source->session);
+			source->session = NULL;
 		}
-		sink->stream = NULL;
-		sink->cb_id = 0;
+		source->stream = NULL;
+		source->cb_id = 0;
 		break;
 	case AVDTP_STATE_OPEN:
 		if (old_state == AVDTP_STATE_CONFIGURED &&
-				sink->state == SINK_STATE_CONNECTING) {
-			value = TRUE;
-			g_dbus_emit_signal(dev->conn, dev->path,
-						AUDIO_SINK_INTERFACE,
-						"Connected",
-						DBUS_TYPE_INVALID);
-			emit_property_changed(dev->conn, dev->path,
-						AUDIO_SINK_INTERFACE,
-						"Connected",
-						DBUS_TYPE_BOOLEAN, &value);
-			sink->dc_id = device_add_disconnect_watch(dev->btd_dev,
+				source->state == SOURCE_STATE_CONNECTING) {
+			source->dc_id = device_add_disconnect_watch(dev->btd_dev,
 								disconnect_cb,
 								dev, NULL);
-		} else if (old_state == AVDTP_STATE_STREAMING) {
-			value = FALSE;
-			g_dbus_emit_signal(dev->conn, dev->path,
-						AUDIO_SINK_INTERFACE,
-						"Stopped",
-						DBUS_TYPE_INVALID);
-			emit_property_changed(dev->conn, dev->path,
-						AUDIO_SINK_INTERFACE,
-						"Playing",
-						DBUS_TYPE_BOOLEAN, &value);
 		}
-		sink_set_state(dev, SINK_STATE_CONNECTED);
+		source_set_state(dev, SOURCE_STATE_CONNECTED);
 		break;
 	case AVDTP_STATE_STREAMING:
-		value = TRUE;
-		g_dbus_emit_signal(dev->conn, dev->path, AUDIO_SINK_INTERFACE,
-					"Playing", DBUS_TYPE_INVALID);
-		emit_property_changed(dev->conn, dev->path,
-					AUDIO_SINK_INTERFACE, "Playing",
-					DBUS_TYPE_BOOLEAN, &value);
-		sink_set_state(dev, SINK_STATE_PLAYING);
+		source_set_state(dev, SOURCE_STATE_PLAYING);
 		break;
 	case AVDTP_STATE_CONFIGURED:
 	case AVDTP_STATE_CLOSING:
@@ -265,7 +232,7 @@ static void stream_state_changed(struct avdtp_stream *stream,
 		break;
 	}
 
-	sink->stream_state = new_state;
+	source->stream_state = new_state;
 }
 
 static DBusHandlerResult error_failed(DBusConnection *conn,
@@ -276,12 +243,12 @@ static DBusHandlerResult error_failed(DBusConnection *conn,
 
 static gboolean stream_setup_retry(gpointer user_data)
 {
-	struct sink *sink = user_data;
-	struct pending_request *pending = sink->connect;
+	struct source *source = user_data;
+	struct pending_request *pending = source->connect;
 
-	sink->retry_id = 0;
+	source->retry_id = 0;
 
-	if (sink->stream_state >= AVDTP_STATE_OPEN) {
+	if (source->stream_state >= AVDTP_STATE_OPEN) {
 		debug("Stream successfully created, after XCASE connect:connect");
 		if (pending->msg) {
 			DBusMessage *reply;
@@ -294,8 +261,8 @@ static gboolean stream_setup_retry(gpointer user_data)
 			error_failed(pending->conn, pending->msg, "Stream setup failed");
 	}
 
-	sink->connect = NULL;
-	pending_request_free(sink->dev, pending);
+	source->connect = NULL;
+	pending_request_free(source->dev, pending);
 
 	return FALSE;
 }
@@ -304,10 +271,10 @@ static void stream_setup_complete(struct avdtp *session, struct a2dp_sep *sep,
 					struct avdtp_stream *stream,
 					struct avdtp_error *err, void *user_data)
 {
-	struct sink *sink = user_data;
+	struct source *source = user_data;
 	struct pending_request *pending;
 
-	pending = sink->connect;
+	pending = source->connect;
 
 	pending->id = 0;
 
@@ -320,25 +287,25 @@ static void stream_setup_complete(struct avdtp *session, struct a2dp_sep *sep,
 			g_dbus_send_message(pending->conn, reply);
 		}
 
-		sink->connect = NULL;
-		pending_request_free(sink->dev, pending);
+		source->connect = NULL;
+		pending_request_free(source->dev, pending);
 
 		return;
 	}
 
-	avdtp_unref(sink->session);
-	sink->session = NULL;
+	avdtp_unref(source->session);
+	source->session = NULL;
 	if (avdtp_error_type(err) == AVDTP_ERROR_ERRNO
 			&& avdtp_error_posix_errno(err) != EHOSTDOWN) {
 		debug("connect:connect XCASE detected");
-		sink->retry_id = g_timeout_add_seconds(STREAM_SETUP_RETRY_TIMER,
+		source->retry_id = g_timeout_add_seconds(STREAM_SETUP_RETRY_TIMER,
 							stream_setup_retry,
-							sink);
+							source);
 	} else {
 		if (pending->msg)
 			error_failed(pending->conn, pending->msg, "Stream setup failed");
-		sink->connect = NULL;
-		pending_request_free(sink->dev, pending);
+		source->connect = NULL;
+		pending_request_free(source->dev, pending);
 		debug("Stream setup failed : %s", avdtp_strerror(err));
 	}
 }
@@ -482,7 +449,7 @@ static gboolean select_capabilities(struct avdtp *session,
 static void discovery_complete(struct avdtp *session, GSList *seps, struct avdtp_error *err,
 				void *user_data)
 {
-	struct sink *sink = user_data;
+	struct source *source = user_data;
 	struct pending_request *pending;
 	struct avdtp_local_sep *lsep;
 	struct avdtp_remote_sep *rsep;
@@ -490,18 +457,18 @@ static void discovery_complete(struct avdtp *session, GSList *seps, struct avdtp
 	GSList *caps = NULL;
 	int id;
 
-	pending = sink->connect;
+	pending = source->connect;
 
 	if (err) {
-		avdtp_unref(sink->session);
-		sink->session = NULL;
+		avdtp_unref(source->session);
+		source->session = NULL;
 		if (avdtp_error_type(err) == AVDTP_ERROR_ERRNO
 				&& avdtp_error_posix_errno(err) != EHOSTDOWN) {
 			debug("connect:connect XCASE detected");
-			sink->retry_id =
+			source->retry_id =
 				g_timeout_add_seconds(STREAM_SETUP_RETRY_TIMER,
 							stream_setup_retry,
-							sink);
+							source);
 		} else
 			goto failed;
 		return;
@@ -509,7 +476,7 @@ static void discovery_complete(struct avdtp *session, GSList *seps, struct avdtp
 
 	debug("Discovery complete");
 
-	if (avdtp_get_seps(session, AVDTP_SEP_TYPE_SINK, AVDTP_MEDIA_TYPE_AUDIO,
+	if (avdtp_get_seps(session, AVDTP_SEP_TYPE_SOURCE, AVDTP_MEDIA_TYPE_AUDIO,
 				A2DP_CODEC_SBC, &lsep, &rsep) < 0) {
 		error("No matching ACP and INT SEPs found");
 		goto failed;
@@ -522,11 +489,12 @@ static void discovery_complete(struct avdtp *session, GSList *seps, struct avdtp
 
 	sep = a2dp_get(session, rsep);
 	if (!sep) {
-		error("Unable to get a local source SEP");
+		error("Unable to get a local sink SEP");
 		goto failed;
 	}
 
-	id = a2dp_config(sink->session, sep, stream_setup_complete, caps, sink);
+	id = a2dp_config(source->session, sep, stream_setup_complete, caps,
+				source);
 	if (id == 0)
 		goto failed;
 
@@ -536,63 +504,63 @@ static void discovery_complete(struct avdtp *session, GSList *seps, struct avdtp
 failed:
 	if (pending->msg)
 		error_failed(pending->conn, pending->msg, "Stream setup failed");
-	pending_request_free(sink->dev, pending);
-	sink->connect = NULL;
-	avdtp_unref(sink->session);
-	sink->session = NULL;
+	pending_request_free(source->dev, pending);
+	source->connect = NULL;
+	avdtp_unref(source->session);
+	source->session = NULL;
 }
 
-gboolean sink_setup_stream(struct sink *sink, struct avdtp *session)
+gboolean source_setup_stream(struct source *source, struct avdtp *session)
 {
-	if (sink->connect || sink->disconnect)
+	if (source->connect || source->disconnect)
 		return FALSE;
 
-	if (session && !sink->session)
-		sink->session = avdtp_ref(session);
+	if (session && !source->session)
+		source->session = avdtp_ref(session);
 
-	if (!sink->session)
+	if (!source->session)
 		return FALSE;
 
-	avdtp_set_auto_disconnect(sink->session, FALSE);
+	avdtp_set_auto_disconnect(source->session, FALSE);
 
-	if (avdtp_discover(sink->session, discovery_complete, sink) < 0)
+	if (avdtp_discover(source->session, discovery_complete, source) < 0)
 		return FALSE;
 
-	sink->connect = g_new0(struct pending_request, 1);
+	source->connect = g_new0(struct pending_request, 1);
 
 	return TRUE;
 }
 
-static DBusMessage *sink_connect(DBusConnection *conn,
+static DBusMessage *source_connect(DBusConnection *conn,
 				DBusMessage *msg, void *data)
 {
 	struct audio_device *dev = data;
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 	struct pending_request *pending;
 
-	if (!sink->session)
-		sink->session = avdtp_get(&dev->src, &dev->dst);
+	if (!source->session)
+		source->session = avdtp_get(&dev->src, &dev->dst);
 
-	if (!sink->session)
+	if (!source->session)
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
 						"Unable to get a session");
 
-	if (sink->connect || sink->disconnect)
+	if (source->connect || source->disconnect)
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
 						"%s", strerror(EBUSY));
 
-	if (sink->stream_state >= AVDTP_STATE_OPEN)
+	if (source->stream_state >= AVDTP_STATE_OPEN)
 		return g_dbus_create_error(msg, ERROR_INTERFACE
 						".AlreadyConnected",
 						"Device Already Connected");
 
-	if (!sink_setup_stream(sink, NULL))
+	if (!source_setup_stream(source, NULL))
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
 						"Failed to create a stream");
 
 	dev->auto_connect = FALSE;
 
-	pending = sink->connect;
+	pending = source->connect;
 
 	pending->conn = dbus_connection_ref(conn);
 	pending->msg = dbus_message_ref(msg);
@@ -602,33 +570,33 @@ static DBusMessage *sink_connect(DBusConnection *conn,
 	return NULL;
 }
 
-static DBusMessage *sink_disconnect(DBusConnection *conn,
+static DBusMessage *source_disconnect(DBusConnection *conn,
 					DBusMessage *msg, void *data)
 {
 	struct audio_device *device = data;
-	struct sink *sink = device->sink;
+	struct source *source = device->source;
 	struct pending_request *pending;
 	int err;
 
-	if (!sink->session)
+	if (!source->session)
 		return g_dbus_create_error(msg, ERROR_INTERFACE
 						".NotConnected",
 						"Device not Connected");
 
-	if (sink->connect || sink->disconnect)
+	if (source->connect || source->disconnect)
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
 						"%s", strerror(EBUSY));
 
-	if (sink->stream_state < AVDTP_STATE_OPEN) {
+	if (source->stream_state < AVDTP_STATE_OPEN) {
 		DBusMessage *reply = dbus_message_new_method_return(msg);
 		if (!reply)
 			return NULL;
-		avdtp_unref(sink->session);
-		sink->session = NULL;
+		avdtp_unref(source->session);
+		source->session = NULL;
 		return reply;
 	}
 
-	err = avdtp_close(sink->session, sink->stream);
+	err = avdtp_close(source->session, source->stream);
 	if (err < 0)
 		return g_dbus_create_error(msg, ERROR_INTERFACE ".Failed",
 						"%s", strerror(-err));
@@ -636,42 +604,20 @@ static DBusMessage *sink_disconnect(DBusConnection *conn,
 	pending = g_new0(struct pending_request, 1);
 	pending->conn = dbus_connection_ref(conn);
 	pending->msg = dbus_message_ref(msg);
-	sink->disconnect = pending;
+	source->disconnect = pending;
 
 	return NULL;
 }
 
-static DBusMessage *sink_is_connected(DBusConnection *conn,
-					DBusMessage *msg,
-					void *data)
-{
-	struct audio_device *device = data;
-	struct sink *sink = device->sink;
-	DBusMessage *reply;
-	dbus_bool_t connected;
-
-	reply = dbus_message_new_method_return(msg);
-	if (!reply)
-		return NULL;
-
-	connected = (sink->stream_state >= AVDTP_STATE_CONFIGURED);
-
-	dbus_message_append_args(reply, DBUS_TYPE_BOOLEAN, &connected,
-					DBUS_TYPE_INVALID);
-
-	return reply;
-}
-
-static DBusMessage *sink_get_properties(DBusConnection *conn,
+static DBusMessage *source_get_properties(DBusConnection *conn,
 					DBusMessage *msg, void *data)
 {
 	struct audio_device *device = data;
-	struct sink *sink = device->sink;
+	struct source *source = device->source;
 	DBusMessage *reply;
 	DBusMessageIter iter;
 	DBusMessageIter dict;
 	const char *state;
-	gboolean value;
 
 	reply = dbus_message_new_method_return(msg);
 	if (!reply)
@@ -684,16 +630,8 @@ static DBusMessage *sink_get_properties(DBusConnection *conn,
 			DBUS_TYPE_STRING_AS_STRING DBUS_TYPE_VARIANT_AS_STRING
 			DBUS_DICT_ENTRY_END_CHAR_AS_STRING, &dict);
 
-	/* Playing */
-	value = (sink->stream_state == AVDTP_STATE_STREAMING);
-	dict_append_entry(&dict, "Playing", DBUS_TYPE_BOOLEAN, &value);
-
-	/* Connected */
-	value = (sink->stream_state >= AVDTP_STATE_CONFIGURED);
-	dict_append_entry(&dict, "Connected", DBUS_TYPE_BOOLEAN, &value);
-
 	/* State */
-	state = state2str(sink->state);
+	state = state2str(source->state);
 	if (state)
 		dict_append_entry(&dict, "State", DBUS_TYPE_STRING, &state);
 
@@ -702,51 +640,45 @@ static DBusMessage *sink_get_properties(DBusConnection *conn,
 	return reply;
 }
 
-static GDBusMethodTable sink_methods[] = {
-	{ "Connect",		"",	"",	sink_connect,
+static GDBusMethodTable source_methods[] = {
+	{ "Connect",		"",	"",	source_connect,
 						G_DBUS_METHOD_FLAG_ASYNC },
-	{ "Disconnect",		"",	"",	sink_disconnect,
+	{ "Disconnect",		"",	"",	source_disconnect,
 						G_DBUS_METHOD_FLAG_ASYNC },
-	{ "IsConnected",	"",	"b",	sink_is_connected,
-						G_DBUS_METHOD_FLAG_DEPRECATED },
-	{ "GetProperties",	"",	"a{sv}",sink_get_properties },
+	{ "GetProperties",	"",	"a{sv}",source_get_properties },
 	{ NULL, NULL, NULL, NULL }
 };
 
-static GDBusSignalTable sink_signals[] = {
-	{ "Connected",			"",	G_DBUS_SIGNAL_FLAG_DEPRECATED },
-	{ "Disconnected",		"",	G_DBUS_SIGNAL_FLAG_DEPRECATED },
-	{ "Playing",			"",	G_DBUS_SIGNAL_FLAG_DEPRECATED },
-	{ "Stopped",			"",	G_DBUS_SIGNAL_FLAG_DEPRECATED },
+static GDBusSignalTable source_signals[] = {
 	{ "PropertyChanged",		"sv"	},
 	{ NULL, NULL }
 };
 
-static void sink_free(struct audio_device *dev)
+static void source_free(struct audio_device *dev)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 
-	if (sink->cb_id)
-		avdtp_stream_remove_cb(sink->session, sink->stream,
-					sink->cb_id);
+	if (source->cb_id)
+		avdtp_stream_remove_cb(source->session, source->stream,
+					source->cb_id);
 
-	if (sink->dc_id)
-		device_remove_disconnect_watch(dev->btd_dev, sink->dc_id);
+	if (source->dc_id)
+		device_remove_disconnect_watch(dev->btd_dev, source->dc_id);
 
-	if (sink->session)
-		avdtp_unref(sink->session);
+	if (source->session)
+		avdtp_unref(source->session);
 
-	if (sink->connect)
-		pending_request_free(dev, sink->connect);
+	if (source->connect)
+		pending_request_free(dev, source->connect);
 
-	if (sink->disconnect)
-		pending_request_free(dev, sink->disconnect);
+	if (source->disconnect)
+		pending_request_free(dev, source->disconnect);
 
-	if (sink->retry_id)
-		g_source_remove(sink->retry_id);
+	if (source->retry_id)
+		g_source_remove(source->retry_id);
 
-	g_free(sink);
-	dev->sink = NULL;
+	g_free(source);
+	dev->source = NULL;
 }
 
 static void path_unregister(void *data)
@@ -754,111 +686,111 @@ static void path_unregister(void *data)
 	struct audio_device *dev = data;
 
 	debug("Unregistered interface %s on path %s",
-		AUDIO_SINK_INTERFACE, dev->path);
+		AUDIO_SOURCE_INTERFACE, dev->path);
 
-	sink_free(dev);
+	source_free(dev);
 }
 
-void sink_unregister(struct audio_device *dev)
+void source_unregister(struct audio_device *dev)
 {
 	g_dbus_unregister_interface(dev->conn, dev->path,
-		AUDIO_SINK_INTERFACE);
+		AUDIO_SOURCE_INTERFACE);
 }
 
-struct sink *sink_init(struct audio_device *dev)
+struct source *source_init(struct audio_device *dev)
 {
-	struct sink *sink;
+	struct source *source;
 
 	if (!g_dbus_register_interface(dev->conn, dev->path,
-					AUDIO_SINK_INTERFACE,
-					sink_methods, sink_signals, NULL,
+					AUDIO_SOURCE_INTERFACE,
+					source_methods, source_signals, NULL,
 					dev, path_unregister))
 		return NULL;
 
 	debug("Registered interface %s on path %s",
-		AUDIO_SINK_INTERFACE, dev->path);
+		AUDIO_SOURCE_INTERFACE, dev->path);
 
 	if (avdtp_callback_id == 0)
 		avdtp_callback_id = avdtp_add_state_cb(avdtp_state_callback,
 									NULL);
 
-	sink = g_new0(struct sink, 1);
+	source = g_new0(struct source, 1);
 
-	sink->dev = dev;
+	source->dev = dev;
 
-	return sink;
+	return source;
 }
 
-gboolean sink_is_active(struct audio_device *dev)
+gboolean source_is_active(struct audio_device *dev)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 
-	if (sink->session)
+	if (source->session)
 		return TRUE;
 
 	return FALSE;
 }
 
-avdtp_state_t sink_get_state(struct audio_device *dev)
+avdtp_state_t source_get_state(struct audio_device *dev)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 
-	return sink->stream_state;
+	return source->stream_state;
 }
 
-gboolean sink_new_stream(struct audio_device *dev, struct avdtp *session,
+gboolean source_new_stream(struct audio_device *dev, struct avdtp *session,
 				struct avdtp_stream *stream)
 {
-	struct sink *sink = dev->sink;
+	struct source *source = dev->source;
 
-	if (sink->stream)
+	if (source->stream)
 		return FALSE;
 
-	if (!sink->session)
-		sink->session = avdtp_ref(session);
+	if (!source->session)
+		source->session = avdtp_ref(session);
 
-	sink->stream = stream;
+	source->stream = stream;
 
-	sink->cb_id = avdtp_stream_add_cb(session, stream,
+	source->cb_id = avdtp_stream_add_cb(session, stream,
 						stream_state_changed, dev);
 
 	return TRUE;
 }
 
-gboolean sink_shutdown(struct sink *sink)
+gboolean source_shutdown(struct source *source)
 {
-	if (!sink->stream)
+	if (!source->stream)
 		return FALSE;
 
-	if (avdtp_close(sink->session, sink->stream) < 0)
+	if (avdtp_close(source->session, source->stream) < 0)
 		return FALSE;
 
 	return TRUE;
 }
 
-unsigned int sink_add_state_cb(sink_state_cb cb, void *user_data)
+unsigned int source_add_state_cb(source_state_cb cb, void *user_data)
 {
-	struct sink_state_callback *state_cb;
+	struct source_state_callback *state_cb;
 	static unsigned int id = 0;
 
-	state_cb = g_new(struct sink_state_callback, 1);
+	state_cb = g_new(struct source_state_callback, 1);
 	state_cb->cb = cb;
 	state_cb->user_data = user_data;
 	state_cb->id = ++id;
 
-	sink_callbacks = g_slist_append(sink_callbacks, state_cb);
+	source_callbacks = g_slist_append(source_callbacks, state_cb);
 
 	return state_cb->id;
 }
 
-gboolean sink_remove_state_cb(unsigned int id)
+gboolean source_remove_state_cb(unsigned int id)
 {
 	GSList *l;
 
-	for (l = sink_callbacks; l != NULL; l = l->next) {
-		struct sink_state_callback *cb = l->data;
+	for (l = source_callbacks; l != NULL; l = l->next) {
+		struct source_state_callback *cb = l->data;
 		if (cb && cb->id == id) {
-			sink_callbacks = g_slist_remove(sink_callbacks, cb);
+			source_callbacks = g_slist_remove(source_callbacks, cb);
 			g_free(cb);
 			return TRUE;
 		}

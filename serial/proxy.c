@@ -58,7 +58,6 @@
 #include "textfile.h"
 
 #include "error.h"
-#include "storage.h"
 #include "sdpd.h"
 #include "glib-helper.h"
 #include "btio.h"
@@ -93,6 +92,8 @@ struct serial_proxy {
 	char		*path;		/* Proxy path */
 	char		*uuid128;	/* UUID 128 */
 	char		*address;	/* TTY or Unix socket name */
+	char		*owner;		/* Application bus name */
+	guint		watch;		/* Application watch */
 	short int	port;		/* TCP port */
 	proxy_type_t	type;		/* TTY or Unix socket */
 	struct termios  sys_ti;		/* Default TTY setting */
@@ -131,6 +132,7 @@ static void disable_proxy(struct serial_proxy *prx)
 
 static void proxy_free(struct serial_proxy *prx)
 {
+	g_free(prx->owner);
 	g_free(prx->path);
 	g_free(prx->address);
 	g_free(prx->uuid128);
@@ -189,6 +191,7 @@ static sdp_record_t *proxy_record_new(const char *uuid128, uint8_t channel)
 	sdp_list_free(root, NULL);
 
 	bt_string2uuid(&uuid, uuid128);
+	sdp_uuid128_to_uuid(&uuid);
 	svclass_id = sdp_list_append(NULL, &uuid);
 	sdp_set_service_classes(record, svclass_id);
 	sdp_list_free(svclass_id, NULL);
@@ -214,8 +217,7 @@ static sdp_record_t *proxy_record_new(const char *uuid128, uint8_t channel)
 
 	add_lang_attr(record);
 
-	sdp_set_info_attr(record, "Port Proxy Entity",
-				NULL, "Port Proxy Entity");
+	sdp_set_info_attr(record, "Serial Proxy", NULL, "Serial Proxy");
 
 	sdp_data_free(ch);
 	sdp_list_free(proto[0], NULL);
@@ -307,10 +309,11 @@ static inline int unix_socket_connect(const char *address)
 		 * Abstract namespace: first byte NULL, x00
 		 * must be removed from the original address.
 		 */
-		strcpy(addr.sun_path + 1, address + 3);
+		strncpy(addr.sun_path + 1, address + 3,
+						sizeof(addr.sun_path) - 2);
 	} else {
 		/* Filesystem address */
-		strcpy(addr.sun_path, address);
+		strncpy(addr.sun_path, address, sizeof(addr.sun_path) - 1);
 	}
 
 	/* Unix socket */
@@ -510,29 +513,27 @@ drop:
 	g_io_channel_shutdown(chan, TRUE, NULL);
 }
 
-static DBusMessage *proxy_enable(DBusConnection *conn,
-				DBusMessage *msg, void *data)
+static int enable_proxy(struct serial_proxy *prx)
 {
-	struct serial_proxy *prx = data;
 	sdp_record_t *record;
-	GError *err = NULL;
-	DBusMessage *reply;
+	GError *gerr = NULL;
+	int err;
 
 	if (prx->io)
-		return failed(msg, "Already enabled");
+		return -EALREADY;
 
 	/* Listen */
 	prx->io = bt_io_listen(BT_IO_RFCOMM, NULL, confirm_event_cb, prx,
-				NULL, &err,
+				NULL, &gerr,
 				BT_IO_OPT_SOURCE_BDADDR, &prx->src,
 				BT_IO_OPT_INVALID);
 	if (!prx->io)
 		goto failed;
 
-	bt_io_get(prx->io, BT_IO_RFCOMM, &err,
+	bt_io_get(prx->io, BT_IO_RFCOMM, &gerr,
 			BT_IO_OPT_CHANNEL, &prx->channel,
 			BT_IO_OPT_INVALID);
-	if (err) {
+	if (gerr) {
 		g_io_channel_unref(prx->io);
 		prx->io = NULL;
 		goto failed;
@@ -545,24 +546,42 @@ static DBusMessage *proxy_enable(DBusConnection *conn,
 	record = proxy_record_new(prx->uuid128, prx->channel);
 	if (!record) {
 		g_io_channel_unref(prx->io);
-		return failed(msg, "Unable to allocate new service record");
+		return -ENOMEM;
 	}
 
-	if (add_record_to_server(&prx->src, record) < 0) {
+	err = add_record_to_server(&prx->src, record);
+	if (err < 0) {
 		sdp_record_free(record);
 		g_io_channel_unref(prx->io);
-		return failed(msg, "Service registration failed");
+		return err;
 	}
 
 	prx->record_id = record->handle;
 
-	return dbus_message_new_method_return(msg);
+	return 0;
 
 failed:
-	error("%s", err->message);
-	reply = failed(msg, err->message);
-	g_error_free(err);
-	return reply;
+	error("%s", gerr->message);
+	g_error_free(gerr);
+	return -EIO;
+
+}
+static DBusMessage *proxy_enable(DBusConnection *conn,
+				DBusMessage *msg, void *data)
+{
+	struct serial_proxy *prx = data;
+	int err;
+
+	err = enable_proxy(prx);
+	if (err == -EALREADY)
+		return failed(msg, "Already enabled");
+	else if (err == -ENOMEM)
+		return failed(msg, "Unable to allocate new service record");
+	else if (err < 0)
+		return g_dbus_create_error(msg, ERROR_INTERFACE "Failed",
+				"Proxy enable failed (%s)", strerror(-err));
+
+	return dbus_message_new_method_return(msg);
 }
 
 static DBusMessage *proxy_disable(DBusConnection *conn,
@@ -759,9 +778,6 @@ static DBusMessage *proxy_set_serial_params(DBusConnection *conn,
 	cfsetispeed(&prx->proxy_ti, speed);
 	cfsetospeed(&prx->proxy_ti, speed);
 
-	proxy_store(&prx->src, prx->uuid128, prx->address, NULL,
-				prx->channel, 0, &prx->proxy_ti);
-
 	return dbus_message_new_method_return(msg);
 }
 
@@ -784,8 +800,8 @@ static void proxy_path_unregister(gpointer data)
 		goto done;
 
 	/* Restore the initial TTY configuration */
-	sk =  open(prx->address, O_RDWR | O_NOCTTY);
-	if (sk) {
+	sk = open(prx->address, O_RDWR | O_NOCTTY);
+	if (sk >= 0) {
 		tcsetattr(sk, TCSAFLUSH, &prx->sys_ti);
 		close(sk);
 	}
@@ -794,7 +810,7 @@ done:
 	proxy_free(prx);
 }
 
-static int register_proxy_object(struct serial_proxy *prx, char *outpath, size_t size)
+static int register_proxy_object(struct serial_proxy *prx)
 {
 	struct serial_adapter *adapter = prx->adapter;
 	char path[MAX_PATH_LENGTH + 1];
@@ -813,9 +829,6 @@ static int register_proxy_object(struct serial_proxy *prx, char *outpath, size_t
 	prx->path = g_strdup(path);
 	adapter->proxies = g_slist_append(adapter->proxies, prx);
 
-	if (outpath)
-		strncpy(outpath, path, size);
-
 	debug("Registered proxy: %s", path);
 
 	return 0;
@@ -823,8 +836,8 @@ static int register_proxy_object(struct serial_proxy *prx, char *outpath, size_t
 
 static int proxy_tty_register(struct serial_adapter *adapter,
 				const char *uuid128, const char *address,
-				struct termios *ti, char *outpath, size_t size,
-				gboolean save)
+				struct termios *ti,
+				struct serial_proxy **proxy)
 {
 	struct termios sys_ti;
 	struct serial_proxy *prx;
@@ -857,20 +870,20 @@ static int proxy_tty_register(struct serial_adapter *adapter,
 		memcpy(&prx->proxy_ti, ti, sizeof(*ti));
 	}
 
-	ret = register_proxy_object(prx, outpath, size);
-	if (ret < 0)
+	ret = register_proxy_object(prx);
+	if (ret < 0) {
 		proxy_free(prx);
+		return ret;
+	}
 
-	if (save)
-		proxy_store(&prx->src, uuid128, address, NULL,
-			prx->channel, 0, &prx->proxy_ti);
+	*proxy = prx;
 
 	return ret;
 }
 
 static int proxy_socket_register(struct serial_adapter *adapter,
 				const char *uuid128, const char *address,
-				char *outpath, size_t size, gboolean save)
+				struct serial_proxy **proxy)
 {
 	struct serial_proxy *prx;
 	int ret;
@@ -882,20 +895,20 @@ static int proxy_socket_register(struct serial_adapter *adapter,
 	adapter_get_address(adapter->btd_adapter, &prx->src);
 	prx->adapter = adapter;
 
-	ret = register_proxy_object(prx, outpath, size);
-	if (ret < 0)
+	ret = register_proxy_object(prx);
+	if (ret < 0) {
 		proxy_free(prx);
+		return ret;
+	}
 
-	if (save)
-		proxy_store(&prx->src, uuid128, address, NULL,
-				prx->channel, 0, NULL);
+	*proxy = prx;
 
 	return ret;
 }
 
 static int proxy_tcp_register(struct serial_adapter *adapter,
 				const char *uuid128, const char *address,
-				char *outpath, size_t size, gboolean save)
+				struct serial_proxy **proxy)
 {
 	struct serial_proxy *prx;
 	int ret;
@@ -907,13 +920,13 @@ static int proxy_tcp_register(struct serial_adapter *adapter,
 	adapter_get_address(adapter->btd_adapter, &prx->src);
 	prx->adapter = adapter;
 
-	ret = register_proxy_object(prx, outpath, size);
-	if (ret < 0)
+	ret = register_proxy_object(prx);
+	if (ret < 0) {
 		proxy_free(prx);
+		return ret;
+	}
 
-	if (save)
-		proxy_store(&prx->src, uuid128, address, NULL,
-				prx->channel, 0, NULL);
+	*proxy = prx;
 
 	return ret;
 }
@@ -961,16 +974,86 @@ static int proxy_pathcmp(gconstpointer proxy, gconstpointer p)
 	return strcmp(prx->path, path);
 }
 
+static int register_proxy(struct serial_adapter *adapter,
+				const char *uuid_str, const char *address,
+				struct serial_proxy **proxy)
+{
+	proxy_type_t type;
+	int err;
+
+	type = addr2type(address);
+	if (type == UNKNOWN_PROXY_TYPE)
+		return -EINVAL;
+
+	/* Only one proxy per address(TTY or unix socket) is allowed */
+	if (g_slist_find_custom(adapter->proxies, address, proxy_addrcmp))
+		return -EALREADY;
+
+	switch (type) {
+	case UNIX_SOCKET_PROXY:
+		err = proxy_socket_register(adapter, uuid_str, address, proxy);
+		break;
+	case TTY_PROXY:
+		err = proxy_tty_register(adapter, uuid_str, address, NULL,
+					proxy);
+		break;
+	case TCP_SOCKET_PROXY:
+		err = proxy_tcp_register(adapter, uuid_str, address, proxy);
+		break;
+	default:
+		err = -EINVAL;
+	}
+
+	if (err < 0)
+		return err;
+
+	g_dbus_emit_signal(adapter->conn,
+				adapter_get_path(adapter->btd_adapter),
+				SERIAL_MANAGER_INTERFACE, "ProxyCreated",
+				DBUS_TYPE_STRING, &(*proxy)->path,
+				DBUS_TYPE_INVALID);
+
+	return 0;
+}
+
+static void unregister_proxy(struct serial_proxy *proxy)
+{
+	struct serial_adapter *adapter = proxy->adapter;
+	char *path = g_strdup(proxy->path);
+
+	if (proxy->watch > 0)
+		g_dbus_remove_watch(adapter->conn, proxy->watch);
+
+	g_dbus_emit_signal(adapter->conn,
+			adapter_get_path(adapter->btd_adapter),
+			SERIAL_MANAGER_INTERFACE, "ProxyRemoved",
+			DBUS_TYPE_STRING, &path,
+			DBUS_TYPE_INVALID);
+
+	adapter->proxies = g_slist_remove(adapter->proxies, proxy);
+
+	g_dbus_unregister_interface(adapter->conn, path,
+					SERIAL_PROXY_INTERFACE);
+
+	g_free(path);
+}
+
+static void watch_proxy(DBusConnection *connection, void *user_data)
+{
+	struct serial_proxy *proxy = user_data;
+
+	proxy->watch = 0;
+	unregister_proxy(proxy);
+}
+
 static DBusMessage *create_proxy(DBusConnection *conn,
 				DBusMessage *msg, void *data)
 {
 	struct serial_adapter *adapter = data;
-	char path[MAX_PATH_LENGTH + 1];
-	const char *pattern, *address, *ppath = path;
+	struct serial_proxy *proxy;
+	const char *pattern, *address;
 	char *uuid_str;
-	proxy_type_t type;
-	uuid_t uuid;
-	int ret;
+	int err;
 
 	if (!dbus_message_get_args(msg, NULL,
 				DBUS_TYPE_STRING, &pattern,
@@ -982,50 +1065,24 @@ static DBusMessage *create_proxy(DBusConnection *conn,
 	if (!uuid_str)
 		return invalid_arguments(msg, "Invalid UUID");
 
-	bt_string2uuid(&uuid, uuid_str);
-
-	type = addr2type(address);
-	if (type == UNKNOWN_PROXY_TYPE) {
-		g_free(uuid_str);
-		return invalid_arguments(msg, "Invalid address");
-	}
-
-	/* Only one proxy per address(TTY or unix socket) is allowed */
-	if (g_slist_find_custom(adapter->proxies, address, proxy_addrcmp)) {
-		g_free(uuid_str);
-		return g_dbus_create_error(msg, ERROR_INTERFACE ".AlreadyExist",
-						"Proxy already exists");
-	}
-
-	switch (type) {
-	case UNIX_SOCKET_PROXY:
-		ret = proxy_socket_register(adapter, uuid_str, address,
-						path, sizeof(path), TRUE);
-		break;
-	case TTY_PROXY:
-		ret = proxy_tty_register(adapter, uuid_str, address,
-				NULL, path, sizeof(path), TRUE);
-		break;
-	case TCP_SOCKET_PROXY:
-		ret = proxy_tcp_register(adapter, uuid_str, address,
-					path, sizeof(path), TRUE);
-		break;
-	default:
-		ret = -1;
-	}
-
+	err = register_proxy(adapter, uuid_str, address, &proxy);
 	g_free(uuid_str);
 
-	if (ret < 0)
-		return failed(msg, "Create object path failed");
+	if (err == -EINVAL)
+		return invalid_arguments(msg, "Invalid address");
+	else if (err == -EALREADY)
+		return g_dbus_create_error(msg, ERROR_INTERFACE ".AlreadyExist",
+						"Proxy already exists");
+	else if (err < 0)
+		return g_dbus_create_error(msg, ERROR_INTERFACE "Failed",
+				"Proxy creation failed (%s)", strerror(-err));
 
-	g_dbus_emit_signal(adapter->conn,
-			adapter_get_path(adapter->btd_adapter),
-			SERIAL_MANAGER_INTERFACE, "ProxyCreated",
-			DBUS_TYPE_STRING, &ppath,
-			DBUS_TYPE_INVALID);
+	proxy->owner = g_strdup(dbus_message_get_sender(msg));
+	proxy->watch = g_dbus_add_disconnect_watch(conn, proxy->owner,
+						watch_proxy,
+						proxy, NULL);
 
-	return g_dbus_create_reply(msg, DBUS_TYPE_STRING, &ppath,
+	return g_dbus_create_reply(msg, DBUS_TYPE_STRING, &proxy->path,
 					DBUS_TYPE_INVALID);
 }
 
@@ -1062,7 +1119,7 @@ static DBusMessage *remove_proxy(DBusConnection *conn,
 {
 	struct serial_adapter *adapter = data;
 	struct serial_proxy *prx;
-	const char *path;
+	const char *path, *sender;
 	GSList *l;
 
 	if (!dbus_message_get_args(msg, NULL,
@@ -1074,17 +1131,13 @@ static DBusMessage *remove_proxy(DBusConnection *conn,
 	if (!l)
 		return does_not_exist(msg, "Invalid proxy path");
 
-	g_dbus_emit_signal(conn,
-			adapter_get_path(adapter->btd_adapter),
-			SERIAL_MANAGER_INTERFACE, "ProxyRemoved",
-			DBUS_TYPE_STRING, &path,
-			DBUS_TYPE_INVALID);
-
 	prx = l->data;
-	proxy_delete(&prx->src, prx->address);
-	adapter->proxies = g_slist_remove(adapter->proxies, prx);
 
-	g_dbus_unregister_interface(conn, path, SERIAL_PROXY_INTERFACE);
+	sender = dbus_message_get_sender(msg);
+	if (g_strcmp0(prx->owner, sender) != 0)
+		return failed(msg, "Permission denied");
+
+	unregister_proxy(prx);
 
 	return dbus_message_new_method_return(msg);
 }
@@ -1126,74 +1179,6 @@ static GDBusSignalTable manager_signals[] = {
 	{ }
 };
 
-static void parse_proxy(char *key, char *value, void *data)
-{
-	struct serial_adapter *adapter = data;
-	char uuid128[MAX_LEN_UUID_STR], tmp[3];
-	char *pvalue;
-	proxy_type_t type;
-	unsigned int pos;
-	int ch, opts;
-	struct termios ti;
-	uint8_t *pti;
-
-	memset(uuid128, 0, sizeof(uuid128));
-	ch = opts = pos = 0;
-	if (sscanf(value,"%s %d 0x%04X %n", uuid128, &ch, &opts, &pos) != 3)
-		return;
-
-	/* Extracting name */
-	value += pos;
-	pvalue = strchr(value, ':');
-	if (!pvalue)
-		return;
-
-	/* FIXME: currently name is not used */
-	*pvalue = '\0';
-
-	type = addr2type(key);
-	switch (type) {
-	case TTY_PROXY:
-		/* Extracting termios */
-		pvalue++;
-		if (!pvalue || strlen(pvalue) != (2 * sizeof(ti)))
-			return;
-
-		memset(&ti, 0, sizeof(ti));
-		memset(tmp, 0, sizeof(tmp));
-
-		/* Converting to termios struct */
-		pti = (uint8_t *) &ti;
-		for (pos = 0; pos < sizeof(ti); pos++, pvalue += 2, pti++) {
-			memcpy(tmp, pvalue, 2);
-			*pti = (uint8_t) strtol(tmp, NULL, 16);
-		}
-
-		proxy_tty_register(adapter, uuid128, key, &ti, NULL, 0, FALSE);
-		break;
-	case UNIX_SOCKET_PROXY:
-		proxy_socket_register(adapter, uuid128, key, NULL, 0, FALSE);
-		break;
-	case TCP_SOCKET_PROXY:
-		proxy_tcp_register(adapter, uuid128, key, NULL, 0, FALSE);
-		break;
-	default:
-		return;
-	}
-}
-
-static void register_stored(struct serial_adapter *adapter)
-{
-	char filename[PATH_MAX + 1];
-	char address[18];
-	bdaddr_t src;
-
-	adapter_get_address(adapter->btd_adapter, &src);
-	ba2str(&src, address);
-	snprintf(filename, PATH_MAX, "%s/%s/proxy", STORAGEDIR, address);
-	textfile_foreach(filename, parse_proxy, adapter);
-}
-
 static struct serial_adapter *find_adapter(GSList *list,
 					struct btd_adapter *btd_adapter)
 {
@@ -1207,6 +1192,75 @@ static struct serial_adapter *find_adapter(GSList *list,
 	}
 
 	return NULL;
+}
+
+static void serial_proxy_init(struct serial_adapter *adapter)
+{
+	GKeyFile *config;
+	GError *gerr = NULL;
+	const char *file = CONFIGDIR "/serial.conf";
+	char **group_list;
+	int i;
+
+	config = g_key_file_new();
+
+	if (!g_key_file_load_from_file(config, file, 0, &gerr)) {
+		error("Parsing %s failed: %s", file, gerr->message);
+		g_error_free(gerr);
+		g_key_file_free(config);
+		return;
+	}
+
+	group_list = g_key_file_get_groups(config, NULL);
+
+	for (i = 0; group_list[i] != NULL; i++) {
+		char *group_str = group_list[i], *uuid_str, *address;
+		int err;
+		struct serial_proxy *prx;
+
+		/* string length of "Proxy" is 5 */
+		if (strlen(group_str) < 5 || strncmp(group_str, "Proxy", 5))
+			continue;
+
+		uuid_str = g_key_file_get_string(config, group_str, "UUID",
+									&gerr);
+		if (gerr) {
+			debug("%s: %s", file, gerr->message);
+			g_error_free(gerr);
+			g_key_file_free(config);
+			return;
+		}
+
+		address = g_key_file_get_string(config, group_str, "Address",
+									&gerr);
+		if (gerr) {
+			debug("%s: %s", file, gerr->message);
+			g_error_free(gerr);
+			g_key_file_free(config);
+			g_free(uuid_str);
+			return;
+		}
+
+		err = register_proxy(adapter, uuid_str, address, &prx);
+		if (err == -EINVAL)
+			error("Invalid address.");
+		else if (err == -EALREADY)
+			debug("Proxy already exists.");
+		else if (err < 0)
+			error("Proxy creation failed (%s)", strerror(-err));
+		else {
+			err = enable_proxy(prx);
+			if (err < 0)
+				error("Proxy enable failed (%s)",
+						strerror(-err));
+		}
+
+		g_free(uuid_str);
+		g_free(address);
+	}
+
+	g_strfreev(group_list);
+	g_key_file_free(config);
 }
 
 int proxy_register(DBusConnection *conn, struct btd_adapter *btd_adapter)
@@ -1233,12 +1287,12 @@ int proxy_register(DBusConnection *conn, struct btd_adapter *btd_adapter)
 		return -1;
 	}
 
-	register_stored(adapter);
-
 	adapters = g_slist_append(adapters, adapter);
 
 	debug("Registered interface %s on path %s",
 		SERIAL_MANAGER_INTERFACE, path);
+
+	serial_proxy_init(adapter);
 
 	return 0;
 }

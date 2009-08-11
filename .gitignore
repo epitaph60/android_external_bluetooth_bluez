@@ -29,6 +29,7 @@ bluez.pc
 include/bluetooth
 src/bluetoothd
 audio/telephony.c
+scripts/bluetooth.rules
 
 sbc/sbcdec
 sbc/sbcenc
@@ -78,3 +79,5 @@ doc/*.sgml
 doc/version.xml
 doc/xml
 doc/html
+src/bluetoothd.8
+src/hcid.conf.5

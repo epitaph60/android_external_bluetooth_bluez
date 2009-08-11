@@ -263,7 +263,7 @@ static gboolean establish_service_level_conn(struct gateway *gw)
 	gchar buf[RFCOMM_BUF_SIZE];
 	gboolean res;
 
-	debug("at the begin of establish_service_level_conn()\n");
+	debug("at the begin of establish_service_level_conn()");
 	res = rfcomm_send_and_read(gw, AG_FEATURES, buf,
 				sizeof(AG_FEATURES) - 1);
 	if (!res || sscanf(buf, "\r\n+BRSF:%d", &gw->ag_features) != 1)
@@ -323,7 +323,7 @@ static void process_ind_change(struct audio_device *dev, guint index,
 
 	ind->value = value;
 
-	debug("at the begin of process_ind_change, name is %s\n", name);
+	debug("at the begin of process_ind_change, name is %s", name);
 	if (!strcmp(name, "\"call\"")) {
 		if (value > 0) {
 			g_dbus_emit_signal(dev->conn, dev->path,
@@ -391,11 +391,14 @@ static void process_ring(struct audio_device *device, GIOChannel *chan,
 	gchar *cli;
 	gchar *sep;
 	gsize read;
+	GIOStatus status;
 
 	rfcomm_stop_watch(device);
-	g_io_channel_read_chars(chan, buf, RFCOMM_BUF_SIZE - 1, &read, NULL);
+	status = g_io_channel_read_chars(chan, buf, RFCOMM_BUF_SIZE - 1, &read, NULL);
+	if (status != G_IO_STATUS_NORMAL)
+		return;
 
-	debug("at the begin of process_ring\n");
+	debug("at the begin of process_ring");
 	if (strlen(buf) > AG_CALLER_NUM_SIZE + 10)
 		error("process_ring(): buf is too long '%s'", buf);
 	else if ((cli = strstr(buf, "\r\n+CLIP"))) {
@@ -431,14 +434,17 @@ static gboolean rfcomm_ag_data_cb(GIOChannel *chan, GIOCondition cond,
 	guint index;
 	gchar *sep;
 
-	debug("at the begin of rfcomm_ag_data_cb()\n");
+	debug("at the begin of rfcomm_ag_data_cb()");
 	if (cond & G_IO_NVAL)
 		return FALSE;
 
 	gw = device->gateway;
 
-	if (cond & (G_IO_ERR | G_IO_HUP))
+	if (cond & (G_IO_ERR | G_IO_HUP)) {
+		debug("connection with remote BT is closed");
+		gateway_close(device);
 		return FALSE;
+	}
 
 	if (g_io_channel_read_chars(chan, buf, sizeof(buf) - 1, &read, NULL)
 			!= G_IO_STATUS_NORMAL)
@@ -492,9 +498,9 @@ static gboolean sco_io_cb(GIOChannel *chan, GIOCondition cond,
 		return FALSE;
 
 	if (cond & (G_IO_ERR | G_IO_HUP)) {
-		GIOChannel *chan = gw->sco;
-		g_io_channel_unref(chan);
-		g_io_channel_close(chan);
+		debug("sco connection is released");
+		g_io_channel_shutdown(gw->sco, TRUE, NULL);
+		g_io_channel_unref(gw->sco);
 		gw->sco = NULL;
 		return FALSE;
 	}
@@ -507,19 +513,20 @@ static void sco_connect_cb(GIOChannel *chan, GError *err, gpointer user_data)
 	struct audio_device *dev = (struct audio_device *) user_data;
 	struct gateway *gw = dev->gateway;
 
-	debug("at the begin of sco_connect_cb() in gateway.c\n");
+	debug("at the begin of sco_connect_cb() in gateway.c");
 
 	if (err) {
 		error("sco_connect_cb(): %s", err->message);
 		/* not sure, but from other point of view,
 		 * what is the reason to have headset which
 		 * cannot play audio? */
+		if (gw->sco_start_cb)
+			gw->sco_start_cb(NULL, gw->sco_start_cb_data);
 		gateway_close(dev);
 		return;
 	}
 
-	gw->sco = chan;
-	g_io_channel_ref(chan);
+	gw->sco = g_io_channel_ref(chan);
 	if (gw->sco_start_cb)
 		gw->sco_start_cb(dev, gw->sco_start_cb_data);
 
@@ -554,9 +561,7 @@ static void rfcomm_connect_cb(GIOChannel *chan, GError *err,
 	g_io_channel_set_encoding(chan, NULL, NULL);
 	g_io_channel_set_buffered(chan, FALSE);
 	if (!gw->rfcomm)
-		g_io_channel_ref(chan);
-
-	gw->rfcomm = chan;
+		gw->rfcomm = g_io_channel_ref(chan);
 
 	if (establish_service_level_conn(dev->gateway)) {
 		gboolean value = TRUE;
@@ -590,77 +595,83 @@ static void rfcomm_connect_cb(GIOChannel *chan, GError *err,
 static void get_record_cb(sdp_list_t *recs, int perr, gpointer user_data)
 {
 	struct audio_device *dev = user_data;
-	DBusMessage *conn_mes = dev->gateway->connect_message;
+	DBusMessage *msg = dev->gateway->connect_message;
 	int ch = -1;
-	sdp_list_t *protos, *classes = NULL;
+	sdp_list_t *protos, *classes;
 	uuid_t uuid;
 	gateway_stream_cb_t sco_cb;
 	GIOChannel *io;
 	GError *err = NULL;
 
-	if (perr < 0)
+	if (perr < 0) {
 		error("Unable to get service record: %s (%d)", strerror(-perr),
 					-perr);
-	else if (!recs || !recs->data)
+		goto fail;
+	}
+
+	if (!recs || !recs->data) {
 		error("No records found");
-	else if (sdp_get_service_classes(recs->data, &classes) < 0)
+		goto fail;
+	}
+
+	if (sdp_get_service_classes(recs->data, &classes) < 0) {
 		error("Unable to get service classes from record");
-	else {
-		memcpy(&uuid, classes->data, sizeof(uuid));
+		goto fail;
+	}
 
-		if (!sdp_uuid128_to_uuid(&uuid) || uuid.type != SDP_UUID16)
-			error("Not a 16 bit UUID");
-		else if (uuid.value.uuid16 != HANDSFREE_AGW_SVCLASS_ID)
-			error("Service record didn't contain the HFP UUID");
-		else if (!sdp_get_access_protos(recs->data, &protos)) {
-			ch = sdp_get_proto_port(protos, RFCOMM_UUID);
-			sdp_list_foreach(protos,
-				(sdp_list_func_t) sdp_list_free, NULL);
-			sdp_list_free(protos, NULL);
-			if (ch == -1)
-				error("Unable to extract RFCOMM channel"
-						" from service record");
-			else {
-				io = bt_io_connect(BT_IO_RFCOMM,
-					rfcomm_connect_cb, dev, NULL, &err,
-					BT_IO_OPT_SOURCE_BDADDR, &dev->src,
-					BT_IO_OPT_DEST_BDADDR, &dev->dst,
-					BT_IO_OPT_CHANNEL, ch,
-					BT_IO_OPT_INVALID);
-				if (!io) {
+	if (sdp_get_access_protos(recs->data, &protos) < 0) {
+		error("Unable to get access protocols from record");
+		goto fail;
+	}
 
-					error("Unable to connect: %s",
-						err->message);
-					if (conn_mes)
-						error_common_reply(dev->conn,
-						conn_mes, ERROR_INTERFACE
+	memcpy(&uuid, classes->data, sizeof(uuid));
+	sdp_list_free(classes, free);
+
+	if (!sdp_uuid128_to_uuid(&uuid) || uuid.type != SDP_UUID16 ||
+			uuid.value.uuid16 != HANDSFREE_AGW_SVCLASS_ID) {
+		sdp_list_free(protos, NULL);
+		error("Invalid service record or not HFP");
+		goto fail;
+	}
+
+	ch = sdp_get_proto_port(protos, RFCOMM_UUID);
+	sdp_list_foreach(protos, (sdp_list_func_t) sdp_list_free, NULL);
+	sdp_list_free(protos, NULL);
+	if (ch <= 0) {
+		error("Unable to extract RFCOMM channel from service record");
+		goto fail;
+	}
+
+	io = bt_io_connect(BT_IO_RFCOMM, rfcomm_connect_cb, dev, NULL, &err,
+				BT_IO_OPT_SOURCE_BDADDR, &dev->src,
+				BT_IO_OPT_DEST_BDADDR, &dev->dst,
+				BT_IO_OPT_CHANNEL, ch,
+				BT_IO_OPT_INVALID);
+	if (!io) {
+		error("Unable to connect: %s", err->message);
+		if (msg) {
+			error_common_reply(dev->conn, msg, ERROR_INTERFACE
 						".ConnectionAttemptFailed",
 						err->message);
-					g_error_free(err);
-					gateway_close(dev);
-				}
-				sdp_list_free(classes, free);
-				return;
-			}
+			msg = NULL;
 		}
+		g_error_free(err);
+		gateway_close(dev);
 	}
 
-	if (classes)
-		sdp_list_free(classes, free);
+	g_io_channel_unref(io);
+	return;
 
-	if (recs && recs->data)
-		sdp_record_free(recs->data);
+fail:
+	if (msg)
+		error_common_reply(dev->conn, msg, ERROR_INTERFACE
+					".NotSupported", "Not supported");
 
-	if (conn_mes) {
-		error_common_reply(dev->conn, conn_mes,
-			ERROR_INTERFACE".NotSupported", "Not supported");
-		dbus_message_unref(conn_mes);
-		dev->gateway->connect_message = NULL;
-	}
+	dev->gateway->connect_message = NULL;
+
 	sco_cb = dev->gateway->sco_start_cb;
 	if (sco_cb)
 		sco_cb(NULL, dev->gateway->sco_start_cb_data);
-
 }
 
 static int get_records(struct audio_device *device)
@@ -678,7 +689,7 @@ static DBusMessage *ag_connect(DBusConnection *conn, DBusMessage *msg,
 	struct audio_device *au_dev = (struct audio_device *) data;
 	struct gateway *gw = au_dev->gateway;
 
-	debug("at the begin of ag_connect() \n");
+	debug("at the begin of ag_connect()");
 	if (gw->rfcomm)
 		return g_dbus_create_error(msg, ERROR_INTERFACE
 					".AlreadyConnected",
@@ -691,7 +702,7 @@ static DBusMessage *ag_connect(DBusConnection *conn, DBusMessage *msg,
 					".ConnectAttemptFailed",
 					"Connect Attempt Failed");
 	}
-	debug("at the end of ag_connect() \n");
+	debug("at the end of ag_connect()");
 	return NULL;
 }
 
@@ -724,7 +735,7 @@ static DBusMessage *process_ag_reponse(DBusMessage *msg, gchar *response)
 	DBusMessage *reply;
 
 
-	debug("in process_ag_reponse, response is %s\n", response);
+	debug("in process_ag_reponse, response is %s", response);
 	if (strstr(response, OK_RESPONSE))
 		reply = dbus_message_new_method_return(msg);
 	else {
@@ -804,7 +815,7 @@ static DBusMessage *ag_call(DBusConnection *conn, DBusMessage *msg,
 	gint atd_len;
 	DBusMessage *result;
 
-	debug("at the begin of ag_call()\n");
+	debug("at the begin of ag_call()");
 	if (!gw->rfcomm)
 		return g_dbus_create_error(msg, ERROR_INTERFACE
 					".NotConnected",
@@ -1048,7 +1059,7 @@ struct gateway *gateway_init(struct audio_device *dev)
 					NULL, dev, NULL))
 		return NULL;
 
-	debug("in gateway_init, dev is %p\n", dev);
+	debug("in gateway_init, dev is %p", dev);
 	gw = g_new0(struct gateway, 1);
 	gw->indies = NULL;
 	gw->is_dialing = FALSE;
@@ -1084,6 +1095,8 @@ int gateway_connect_sco(struct audio_device *dev, GIOChannel *io)
 
 	gw->sco = g_io_channel_ref(io);
 
+	g_io_add_watch(gw->sco, G_IO_ERR | G_IO_HUP | G_IO_NVAL,
+                                (GIOFunc) sco_io_cb, dev);
 	return 0;
 }
 
@@ -1107,13 +1120,13 @@ int gateway_close(struct audio_device *device)
 	g_slist_foreach(gw->indies, (GFunc) indicator_slice_free, NULL);
 	g_slist_free(gw->indies);
 	if (rfcomm) {
-		g_io_channel_close(rfcomm);
+		g_io_channel_shutdown(rfcomm, TRUE, NULL);
 		g_io_channel_unref(rfcomm);
 		gw->rfcomm = NULL;
 	}
 
 	if (sco) {
-		g_io_channel_close(sco);
+		g_io_channel_shutdown(sco, TRUE, NULL);
 		g_io_channel_unref(sco);
 		gw->sco = NULL;
 		gw->sco_start_cb = NULL;
@@ -1137,9 +1150,11 @@ gboolean gateway_request_stream(struct audio_device *dev,
 	GError *err = NULL;
 	GIOChannel *io;
 
-	if (!gw->sco) {
-		if (!gw->rfcomm)
-			return FALSE;
+	if (!gw->rfcomm) {
+		gw->sco_start_cb = cb;
+		gw->sco_start_cb_data = user_data;
+		get_records(dev);
+	} else if (!gw->sco) {
 		gw->sco_start_cb = cb;
 		gw->sco_start_cb_data = user_data;
 		io = bt_io_connect(BT_IO_SCO, sco_connect_cb, dev, NULL, &err,
@@ -1199,7 +1214,7 @@ void gateway_suspend_stream(struct audio_device *dev)
 	if (!gw || !gw->sco)
 		return;
 
-	g_io_channel_close(gw->sco);
+	g_io_channel_shutdown(gw->sco, TRUE, NULL);
 	g_io_channel_unref(gw->sco);
 	gw->sco = NULL;
 	gw->sco_start_cb = NULL;

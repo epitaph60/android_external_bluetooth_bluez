@@ -109,7 +109,7 @@ struct browse_req {
 struct btd_device {
 	bdaddr_t	bdaddr;
 	gchar		*path;
-	char		name[248];
+	char		name[MAX_NAME_LENGTH + 1];
 	struct btd_adapter	*adapter;
 	GSList		*uuids;
 	GSList		*drivers;		/* List of driver_data */
@@ -271,7 +271,7 @@ static DBusMessage *get_properties(DBusConnection *conn,
 	DBusMessageIter iter;
 	DBusMessageIter dict;
 	bdaddr_t src;
-	char name[248], srcaddr[18], dstaddr[18];
+	char name[MAX_NAME_LENGTH + 1], srcaddr[18], dstaddr[18];
 	char **uuids;
 	const char *ptr;
 	dbus_bool_t boolean;
@@ -302,22 +302,19 @@ static DBusMessage *get_properties(DBusConnection *conn,
 	adapter_get_address(adapter, &src);
 	ba2str(&src, srcaddr);
 
-	if (device->name) {
-		ptr = device->name;
-		dict_append_entry(&dict, "Name", DBUS_TYPE_STRING, &ptr);
-	}
+	ptr = device->name;
+	dict_append_entry(&dict, "Name", DBUS_TYPE_STRING, &ptr);
 
 	/* Alias (fallback to name or address) */
 	if (read_device_alias(srcaddr, dstaddr, name, sizeof(name)) < 1) {
-		if (!ptr) {
+		if (strlen(ptr) == 0) {
 			g_strdelimit(dstaddr, ":", '-');
 			ptr = dstaddr;
 		}
 	} else
 		ptr = name;
 
-	if (ptr)
-		dict_append_entry(&dict, "Alias", DBUS_TYPE_STRING, &ptr);
+	dict_append_entry(&dict, "Alias", DBUS_TYPE_STRING, &ptr);
 
 	/* Class */
 	if (read_remote_class(&src, &device->bdaddr, &class) == 0) {
@@ -946,14 +943,14 @@ struct btd_device *device_create(DBusConnection *conn,
 void device_set_name(struct btd_device *device, const char *name)
 {
 	DBusConnection *conn = get_dbus_connection();
-	char alias[248];
+	char alias[MAX_NAME_LENGTH + 1];
 	char srcaddr[18], dstaddr[18];
 	bdaddr_t src;
 
-	if (strncmp(name, device->name, 248) == 0)
+	if (strncmp(name, device->name, MAX_NAME_LENGTH) == 0)
 		return;
 
-	strncpy(device->name, name, 248);
+	strncpy(device->name, name, MAX_NAME_LENGTH);
 
 	emit_property_changed(conn, device->path,
 				DEVICE_INTERFACE, "Name",
@@ -1680,6 +1677,7 @@ DBusMessage *new_authentication_return(DBusMessage *msg, uint8_t status)
 	case 0x0d: /* limited resources */
 	case 0x13: /* user ended the connection */
 	case 0x14: /* terminated due to low resources */
+	case 0x16: /* connection terminated */
 		return dbus_message_new_error(msg,
 					ERROR_INTERFACE ".AuthenticationCanceled",
 					"Authentication Canceled");
@@ -1794,12 +1792,14 @@ static gboolean bonding_io_cb(GIOChannel *io, GIOCondition cond,
 							gpointer user_data)
 {
 	struct btd_device *device = user_data;
+	DBusMessage *reply;
 
 	if (!device->bonding)
 		return FALSE;
 
-	error_connection_attempt_failed(device->bonding->conn,
-					device->bonding->msg, ENETDOWN);
+	reply = new_authentication_return(device->bonding->msg,
+					HCI_CONNECTION_TERMINATED);
+	g_dbus_send_message(device->bonding->conn, reply);
 
 	bonding_request_free(device->bonding);
 

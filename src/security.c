@@ -53,6 +53,7 @@
 #include "adapter.h"
 #include "dbus-hci.h"
 #include "storage.h"
+#include "manager.h"
 
 typedef enum {
 	REQ_PENDING,
@@ -117,6 +118,12 @@ static void hci_req_queue_process(int dev_id)
 
 	/* send the next pending cmd */
 	dd = hci_open_dev(dev_id);
+	if (dd < 0) {
+		error("hci_open_dev(%d): %s (%d)", dev_id, strerror(errno),
+									errno);
+		return;
+	}
+
 	do {
 		struct hci_req_data *data;
 		GSList *l = g_slist_find_custom(hci_req_queue, &dev_id, hci_req_find_by_devid);
@@ -134,7 +141,7 @@ static void hci_req_queue_process(int dev_id)
 			g_free(data);
 		}
 
-	} while(ret_val < 0);
+	} while (ret_val < 0);
 
 	hci_close_dev(dd);
 }
@@ -356,8 +363,11 @@ static void link_key_notify(int dev, bdaddr_t *sba, void *ptr)
 		old_key_type = 0xff;
 
 	dev_id = hci_devid(sa);
-
-	err = hcid_dbus_link_key_notify(sba, dba, evt->link_key, evt->key_type,
+	if (dev_id < 0)
+		err = -errno;
+	else
+		err = hcid_dbus_link_key_notify(sba, dba, evt->link_key,
+						evt->key_type,
 						io_data[dev_id].pin_length,
 						old_key_type);
 	if (err < 0) {
@@ -489,7 +499,8 @@ void set_pin_length(bdaddr_t *sba, int length)
 	ba2str(sba, addr);
 	dev_id = hci_devid(addr);
 
-	io_data[dev_id].pin_length = length;
+	if (dev_id >= 0)
+		io_data[dev_id].pin_length = length;
 }
 
 static void pin_code_request(int dev, bdaddr_t *sba, bdaddr_t *dba)
@@ -541,38 +552,132 @@ reject:
 	hci_send_cmd(dev, OGF_LINK_CTL, OCF_PIN_CODE_NEG_REPLY, 6, dba);
 }
 
+static void start_inquiry(bdaddr_t *local, uint8_t status, gboolean periodic)
+{
+	struct btd_adapter *adapter;
+	int state;
+
+	/* Don't send the signal if the cmd failed */
+	if (status) {
+		error("Inquiry Failed with status 0x%02x", status);
+		return;
+	}
+
+	adapter = manager_find_adapter(local);
+	if (!adapter) {
+		error("Unable to find matching adapter");
+		return;
+	}
+
+	state = adapter_get_state(adapter);
+
+	/* Disable name resolution for non D-Bus clients */
+	if (!adapter_has_discov_sessions(adapter))
+		state &= ~RESOLVE_NAME;
+
+	if (periodic) {
+		state |= PERIODIC_INQUIRY;
+		adapter_set_state(adapter, state);
+		return;
+	}
+
+	state |= STD_INQUIRY;
+	adapter_set_state(adapter, state);
+
+	/*
+	 * Cancel pending remote name request and clean the device list
+	 * when inquiry is supported in periodic inquiry idle state.
+	 */
+	if (adapter_get_state(adapter) & PERIODIC_INQUIRY) {
+		pending_remote_name_cancel(adapter);
+
+		clear_found_devices_list(adapter);
+	}
+}
+
+static void inquiry_complete(bdaddr_t *local, uint8_t status, gboolean periodic)
+{
+	struct btd_adapter *adapter;
+	int state;
+
+	/* Don't send the signal if the cmd failed */
+	if (status) {
+		error("Inquiry Failed with status 0x%02x", status);
+		return;
+	}
+
+	adapter = manager_find_adapter(local);
+	if (!adapter) {
+		error("Unable to find matching adapter");
+		return;
+	}
+
+	/*
+	 * The following scenarios can happen:
+	 * 1. standard inquiry: always send discovery completed signal
+	 * 2. standard inquiry + name resolving: send discovery completed
+	 *    after name resolving
+	 * 3. periodic inquiry: skip discovery completed signal
+	 * 4. periodic inquiry + standard inquiry: always send discovery
+	 *    completed signal
+	 *
+	 * Keep in mind that non D-Bus requests can arrive.
+	 */
+	if (periodic) {
+		state = adapter_get_state(adapter);
+		state &= ~PERIODIC_INQUIRY;
+		adapter_set_state(adapter, state);
+		return;
+	}
+
+	if (adapter_resolve_names(adapter) == 0)
+		return;
+
+	state = adapter_get_state(adapter);
+	/*
+	 * workaround to identify situation when there is no devices around
+	 * but periodic inquiry is active.
+	 */
+	if (!(state & STD_INQUIRY) && !(state & PERIODIC_INQUIRY)) {
+		state |= PERIODIC_INQUIRY;
+		adapter_set_state(adapter, state);
+		return;
+	}
+
+	/* reset the discover type to be able to handle D-Bus and non D-Bus
+	 * requests */
+	state &= ~STD_INQUIRY;
+	state &= ~PERIODIC_INQUIRY;
+	adapter_set_state(adapter, state);
+}
+
 static inline void cmd_status(int dev, bdaddr_t *sba, void *ptr)
 {
 	evt_cmd_status *evt = ptr;
 	uint16_t opcode = btohs(evt->opcode);
 
-	if (evt->status)
-		return;
-
 	if (opcode == cmd_opcode_pack(OGF_LINK_CTL, OCF_INQUIRY))
-		hcid_dbus_inquiry_start(sba);
+		start_inquiry(sba, evt->status, FALSE);
 }
 
 static inline void cmd_complete(int dev, bdaddr_t *sba, void *ptr)
 {
 	evt_cmd_complete *evt = ptr;
 	uint16_t opcode = btohs(evt->opcode);
-	uint8_t status;
+	uint8_t status = *((uint8_t *) ptr + EVT_CMD_COMPLETE_SIZE);
 
 	switch (opcode) {
 	case cmd_opcode_pack(OGF_LINK_CTL, OCF_PERIODIC_INQUIRY):
-		status = *((uint8_t *) ptr + EVT_CMD_COMPLETE_SIZE);
-		hcid_dbus_periodic_inquiry_start(sba, status);
+		start_inquiry(sba, status, TRUE);
 		break;
 	case cmd_opcode_pack(OGF_LINK_CTL, OCF_EXIT_PERIODIC_INQUIRY):
-		status = *((uint8_t *) ptr + EVT_CMD_COMPLETE_SIZE);
-		hcid_dbus_periodic_inquiry_exit(sba, status);
+		inquiry_complete(sba, status, TRUE);
 		break;
 	case cmd_opcode_pack(OGF_LINK_CTL, OCF_INQUIRY_CANCEL):
-		hcid_dbus_inquiry_complete(sba);
+		inquiry_complete(sba, status, FALSE);
 		break;
 	case cmd_opcode_pack(OGF_HOST_CTL, OCF_CHANGE_LOCAL_NAME):
-		hcid_dbus_setname_complete(sba);
+		adapter_setname_complete(sba, status);
 		break;
 	case cmd_opcode_pack(OGF_HOST_CTL, OCF_WRITE_SCAN_ENABLE):
 		hcid_dbus_setscan_enable_complete(sba);
@@ -583,6 +688,10 @@ static inline void cmd_complete(int dev, bdaddr_t *sba, void *ptr)
 	case cmd_opcode_pack(OGF_HOST_CTL, OCF_WRITE_SIMPLE_PAIRING_MODE):
 		hcid_dbus_write_simple_pairing_mode_complete(sba);
 		break;
+	case cmd_opcode_pack(OGF_HOST_CTL, OCF_READ_LOCAL_NAME):
+		ptr += sizeof(evt_cmd_complete);
+		adapter_update_local_name(sba, status, ptr);
+		break;
 	};
 }
 
@@ -590,14 +699,14 @@ static inline void remote_name_information(int dev, bdaddr_t *sba, void *ptr)
 {
 	evt_remote_name_req_complete *evt = ptr;
 	bdaddr_t dba;
-	char name[249];
+	char name[MAX_NAME_LENGTH + 1];
 
 	memset(name, 0, sizeof(name));
 	bacpy(&dba, &evt->bdaddr);
 
 	if (!evt->status) {
 		char *end;
-		memcpy(name, evt->name, 248);
+		memcpy(name, evt->name, MAX_NAME_LENGTH);
 		/* It's ok to cast end between const and non-const since
 		 * we know it points to inside of name which is non-const */
 		if (!g_utf8_validate(name, -1, (const char **) &end))
@@ -621,11 +730,6 @@ static inline void remote_version_information(int dev, bdaddr_t *sba, void *ptr)
 
 	write_version_info(sba, &dba, btohs(evt->manufacturer),
 				evt->lmp_ver, btohs(evt->lmp_subver));
-}
-
-static inline void inquiry_complete(int dev, bdaddr_t *sba, void *ptr)
-{
-	hcid_dbus_inquiry_complete(sba);
 }
 
 static inline void inquiry_result(int dev, bdaddr_t *sba, int plen, void *ptr)
@@ -831,6 +935,7 @@ static gboolean io_security_event(GIOChannel *chan, GIOCondition cond, gpointer 
 	size_t len;
 	hci_event_hdr *eh;
 	GIOError err;
+	evt_cmd_status *evt;
 
 	if (cond & (G_IO_NVAL | G_IO_HUP | G_IO_ERR)) {
 		delete_channel(chan);
@@ -881,7 +986,8 @@ static gboolean io_security_event(GIOChannel *chan, GIOCondition cond, gpointer 
 		break;
 
 	case EVT_INQUIRY_COMPLETE:
-		inquiry_complete(dev, &di->bdaddr, ptr);
+		evt = (evt_cmd_status *) ptr;
+		inquiry_complete(&di->bdaddr, evt->status, FALSE);
 		break;
 
 	case EVT_INQUIRY_RESULT:

@@ -27,6 +27,7 @@
 #include <config.h>
 #endif
 
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -58,6 +59,8 @@
 #include "dbus-common.h"
 #include "agent.h"
 #include "manager.h"
+
+#define LAST_ADAPTER_EXIT_TIMEOUT 30
 
 struct main_opts main_opts;
 
@@ -204,49 +207,6 @@ static void parse_config(GKeyFile *config)
 						HCI_LP_HOLD | HCI_LP_PARK;
 }
 
-static void update_service_classes(const bdaddr_t *bdaddr, uint8_t value)
-{
-	struct hci_dev_list_req *dl;
-	struct hci_dev_req *dr;
-	int i, sk;
-
-	sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
-	if (sk < 0)
-		return;
-
-	dl = g_malloc0(HCI_MAX_DEV * sizeof(*dr) + sizeof(*dl));
-
-	dl->dev_num = HCI_MAX_DEV;
-
-	if (ioctl(sk, HCIGETDEVLIST, dl) < 0) {
-		close(sk);
-		g_free(dl);
-		return;
-	}
-
-	dr = dl->dev_req;
-
-	for (i = 0; i < dl->dev_num; i++, dr++) {
-		struct hci_dev_info di;
-
-		if (hci_devinfo(dr->dev_id, &di) < 0)
-			continue;
-
-		if (hci_test_bit(HCI_RAW, &di.flags))
-			continue;
-
-		if (bacmp(bdaddr, BDADDR_ANY) != 0 &&
-				bacmp(bdaddr, &di.bdaddr) != 0)
-			continue;
-
-		manager_update_adapter(di.dev_id, value);
-	}
-
-	g_free(dl);
-
-	close(sk);
-}
-
 /*
  * Device name expansion
  *   %d - device id
@@ -356,6 +316,37 @@ static void sig_debug(int sig)
 
 static gboolean option_detach = TRUE;
 static gboolean option_debug = FALSE;
+static gboolean option_udev = FALSE;
+
+static guint last_adapter_timeout = 0;
+
+static gboolean exit_timeout(gpointer data)
+{
+	g_main_loop_quit(event_loop);
+	last_adapter_timeout = 0;
+	return FALSE;
+}
+
+void btd_start_exit_timer(void)
+{
+	if (option_udev == FALSE)
+		return;
+
+	if (last_adapter_timeout > 0)
+		g_source_remove(last_adapter_timeout);
+
+	last_adapter_timeout = g_timeout_add_seconds(LAST_ADAPTER_EXIT_TIMEOUT,
+						exit_timeout, NULL);
+}
+
+void btd_stop_exit_timer(void)
+{
+	if (last_adapter_timeout == 0)
+		return;
+
+	g_source_remove(last_adapter_timeout);
+	last_adapter_timeout = 0;
+}
 
 static GOptionEntry options[] = {
 	{ "nodaemon", 'n', G_OPTION_FLAG_REVERSE,
@@ -363,6 +354,8 @@ static GOptionEntry options[] = {
 				"Don't run as daemon in background" },
 	{ "debug", 'd', 0, G_OPTION_ARG_NONE, &option_debug,
 				"Enable debug information output" },
+	{ "udev", 'u', 0, G_OPTION_ARG_NONE, &option_udev,
+				"Run from udev mode of operation" },
 	{ NULL },
 };
 
@@ -395,9 +388,21 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	if (option_udev == TRUE) {
+		int err;
+
+		option_detach = TRUE;
+		err = hcid_dbus_init();
+		if (err < 0) {
+			if (err == -EALREADY)
+				exit(0);
+			exit(1);
+		}
+	}
+
 	g_option_context_free(context);
 
-	if (option_detach == TRUE) {
+	if (option_detach == TRUE && option_udev == FALSE) {
 		if (daemon(0, 0)) {
 			perror("Can't start daemon");
 			exit(1);
@@ -431,13 +436,19 @@ int main(int argc, char *argv[])
 
 	agent_init();
 
-	if (hcid_dbus_init() < 0) {
-		error("Unable to get on D-Bus");
-		exit(1);
+	if (option_udev == FALSE) {
+		if (hcid_dbus_init() < 0) {
+			error("Unable to get on D-Bus");
+			exit(1);
+		}
+	} else {
+		if (daemon(0, 0)) {
+			perror("Can't start daemon");
+			exit(1);
+		}
 	}
 
 	start_sdp_server(mtu, main_opts.deviceid, SDP_SERVER_COMPAT);
-	set_service_classes_callback(update_service_classes);
 
 	/* Loading plugins has to be done after D-Bus has been setup since
 	 * the plugins might wanna expose some paths on the bus. However the
@@ -452,7 +463,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	manager_startup_complete();
+	rfkill_init();
 
 	debug("Entering main loop");
 
@@ -461,6 +472,8 @@ int main(int argc, char *argv[])
 	hcid_dbus_unregister();
 
 	hcid_dbus_exit();
+
+	rfkill_exit();
 
 	plugin_cleanup();
 

@@ -53,7 +53,10 @@
 #include "manager.h"
 #include "storage.h"
 
-static int child_pipe[2];
+static int child_pipe[2] = { -1, -1 };
+
+static guint child_io_id = 0;
+static guint ctl_io_id = 0;
 
 static gboolean child_exit(GIOChannel *io, GIOCondition cond, void *user_data)
 {
@@ -277,22 +280,24 @@ static int init_known_adapters(int ctl)
 {
 	struct hci_dev_list_req *dl;
 	struct hci_dev_req *dr;
-	int i;
+	int i, err;
 
 	dl = g_try_malloc0(HCI_MAX_DEV * sizeof(struct hci_dev_req) + sizeof(uint16_t));
 	if (!dl) {
-		info("Can't allocate devlist buffer: %s (%d)",
+		err = -errno;
+		error("Can't allocate devlist buffer: %s (%d)",
 							strerror(errno), errno);
-		return errno;
+		return err;
 	}
 
 	dl->dev_num = HCI_MAX_DEV;
 	dr = dl->dev_req;
 
 	if (ioctl(ctl, HCIGETDEVLIST, (void *) dl) < 0) {
-		info("Can't get device list: %s (%d)",
+		err = -errno;
+		error("Can't get device list: %s (%d)",
 							strerror(errno), errno);
-		return errno;
+		return err;
 	}
 
 	for (i = 0; i < dl->dev_num; i++, dr++) {
@@ -359,26 +364,31 @@ static int hciops_setup(void)
 	struct sockaddr_hci addr;
 	struct hci_filter flt;
 	GIOChannel *ctl_io, *child_io;
-	int sock;
+	int sock, err;
+
+	if (child_pipe[0] != -1)
+		return -EALREADY;
 
 	if (pipe(child_pipe) < 0) {
+		err = -errno;
 		error("pipe(): %s (%d)", strerror(errno), errno);
-		return errno;
+		return err;
 	}
 
 	child_io = g_io_channel_unix_new(child_pipe[0]);
 	g_io_channel_set_close_on_unref(child_io, TRUE);
-	g_io_add_watch(child_io,
-			G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL,
-			child_exit, NULL);
+	child_io_id = g_io_add_watch(child_io,
+				G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL,
+				child_exit, NULL);
 	g_io_channel_unref(child_io);
 
 	/* Create and bind HCI socket */
 	sock = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
 	if (sock < 0) {
+		err = -errno;
 		error("Can't open HCI socket: %s (%d)", strerror(errno),
 								errno);
-		return errno;
+		return err;
 	}
 
 	/* Set filter */
@@ -387,8 +397,9 @@ static int hciops_setup(void)
 	hci_filter_set_event(EVT_STACK_INTERNAL, &flt);
 	if (setsockopt(sock, SOL_HCI, HCI_FILTER, &flt,
 							sizeof(flt)) < 0) {
+		err = -errno;
 		error("Can't set filter: %s (%d)", strerror(errno), errno);
-		return errno;
+		return err;
 	}
 
 	memset(&addr, 0, sizeof(addr));
@@ -396,15 +407,16 @@ static int hciops_setup(void)
 	addr.hci_dev = HCI_DEV_NONE;
 	if (bind(sock, (struct sockaddr *) &addr,
 							sizeof(addr)) < 0) {
+		err = -errno;
 		error("Can't bind HCI socket: %s (%d)",
 							strerror(errno), errno);
-		return errno;
+		return err;
 	}
 
 	ctl_io = g_io_channel_unix_new(sock);
 	g_io_channel_set_close_on_unref(ctl_io, TRUE);
 
-	g_io_add_watch(ctl_io, G_IO_IN, io_stack_event, NULL);
+	ctl_io_id = g_io_add_watch(ctl_io, G_IO_IN, io_stack_event, NULL);
 
 	g_io_channel_unref(ctl_io);
 
@@ -414,6 +426,25 @@ static int hciops_setup(void)
 
 static void hciops_cleanup(void)
 {
+	if (child_io_id) {
+		g_source_remove(child_io_id);
+		child_io_id = 0;
+	}
+
+	if (ctl_io_id) {
+		g_source_remove(ctl_io_id);
+		ctl_io_id = 0;
+	}
+
+	if (child_pipe[0] >= 0) {
+		close(child_pipe[0]);
+		child_pipe[0] = -1;
+	}
+
+	if (child_pipe[1] >= 0) {
+		close(child_pipe[1]);
+		child_pipe[1] = -1;
+	}
 }
 
 static int hciops_start(int index)
@@ -561,6 +592,157 @@ done:
 	return err;
 }
 
+static int hciops_start_discovery(int index, gboolean periodic)
+{
+	uint8_t lap[3] = { 0x33, 0x8b, 0x9e };
+	int dd, err = 0;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	if (periodic) {
+		periodic_inquiry_cp cp;
+
+		memset(&cp, 0, sizeof(cp));
+		memcpy(&cp.lap, lap, 3);
+		cp.max_period = htobs(24);
+		cp.min_period = htobs(16);
+		cp.length  = 0x08;
+		cp.num_rsp = 0x00;
+
+		err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_PERIODIC_INQUIRY,
+					PERIODIC_INQUIRY_CP_SIZE, &cp);
+	} else {
+		inquiry_cp inq_cp;
+
+		memset(&inq_cp, 0, sizeof(inq_cp));
+		memcpy(&inq_cp.lap, lap, 3);
+		inq_cp.length = 0x08;
+		inq_cp.num_rsp = 0x00;
+
+		err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_INQUIRY,
+					INQUIRY_CP_SIZE, &inq_cp);
+	}
+
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
+static int hciops_stop_discovery(int index)
+{
+	struct hci_dev_info di;
+	int dd, err = 0;
+
+	if (hci_devinfo(index, &di) < 0)
+		return -errno;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	if (hci_test_bit(HCI_INQUIRY, &di.flags))
+		err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_INQUIRY_CANCEL,
+				0, 0);
+	else
+		err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_EXIT_PERIODIC_INQUIRY,
+				0, 0);
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
+static int hciops_resolve_name(int index, bdaddr_t *bdaddr)
+{
+	remote_name_req_cp cp;
+	int dd, err = 0;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	memset(&cp, 0, sizeof(cp));
+	bacpy(&cp.bdaddr, bdaddr);
+	cp.pscan_rep_mode = 0x02;
+
+	err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_REMOTE_NAME_REQ,
+					REMOTE_NAME_REQ_CP_SIZE, &cp);
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
+static int hciops_set_name(int index, const char *name)
+{
+	change_local_name_cp cp;
+	int dd, err = 0;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	memset(&cp, 0, sizeof(cp));
+	strncpy((char *) cp.name, name, sizeof(cp.name));
+
+	err = hci_send_cmd(dd, OGF_HOST_CTL, OCF_CHANGE_LOCAL_NAME,
+					CHANGE_LOCAL_NAME_CP_SIZE, &cp);
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
+static int hciops_read_name(int index)
+{
+	int dd, err = 0;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	err = hci_send_cmd(dd, OGF_HOST_CTL, OCF_READ_LOCAL_NAME, 0, 0);
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
+static int hciops_cancel_resolve_name(int index, bdaddr_t *bdaddr)
+{
+	remote_name_req_cancel_cp cp;
+	int dd, err = 0;
+
+	dd = hci_open_dev(index);
+	if (dd < 0)
+		return -EIO;
+
+	memset(&cp, 0, sizeof(cp));
+	bacpy(&cp.bdaddr, bdaddr);
+
+	err = hci_send_cmd(dd, OGF_LINK_CTL, OCF_REMOTE_NAME_REQ_CANCEL,
+					REMOTE_NAME_REQ_CANCEL_CP_SIZE, &cp);
+	if (err < 0)
+		err = -errno;
+
+	hci_close_dev(dd);
+
+	return err;
+}
+
 static struct btd_adapter_ops hci_ops = {
 	.setup = hciops_setup,
 	.cleanup = hciops_cleanup,
@@ -570,6 +752,12 @@ static struct btd_adapter_ops hci_ops = {
 	.set_connectable = hciops_connectable,
 	.set_discoverable = hciops_discoverable,
 	.set_limited_discoverable = hciops_set_limited_discoverable,
+	.start_discovery = hciops_start_discovery,
+	.stop_discovery = hciops_stop_discovery,
+	.resolve_name = hciops_resolve_name,
+	.cancel_resolve_name = hciops_cancel_resolve_name,
+	.set_name = hciops_set_name,
+	.read_name = hciops_read_name,
 };
 
 static int hciops_init(void)

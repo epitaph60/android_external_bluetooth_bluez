@@ -1,10 +1,14 @@
 AC_PREREQ(2.60)
 AC_INIT()
 
-AM_INIT_AUTOMAKE(bluez, 4.41)
+AM_INIT_AUTOMAKE(bluez, 4.47)
 AM_CONFIG_HEADER(config.h)
 
+m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+
 AM_MAINTAINER_MODE
+
+PKG_PROG_PKG_CONFIG
 
 AC_INIT_BLUEZ
 
@@ -49,19 +53,22 @@ AC_OUTPUT([
 	common/Makefile
 	sbc/Makefile
 	src/Makefile
+	test/Makefile
+	cups/Makefile
+	tools/Makefile
 	client/Makefile
+	rfcomm/Makefile
+	compat/Makefile
 	plugins/Makefile
 	network/Makefile
 	serial/Makefile
 	input/Makefile
 	audio/Makefile
-	tools/Makefile
-	rfcomm/Makefile
-	compat/Makefile
 	scripts/Makefile
-	cups/Makefile
-	test/Makefile
+	scripts/bluetooth.rules
 	doc/Makefile
 	doc/version.xml
+	src/bluetoothd.8
+	src/hcid.conf.5
 	bluez.pc
 ])

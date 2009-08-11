@@ -23,6 +23,7 @@
  */
 
 #include <bluetooth/bluetooth.h>
+#include <dbus/dbus.h>
 #include <glib.h>
 
 #define ADAPTER_INTERFACE	"org.bluez.Adapter"
@@ -34,6 +35,8 @@
 
 /* Actions executed after inquiry complete */
 #define RESOLVE_NAME		0x10
+
+#define MAX_NAME_LENGTH		248
 
 typedef enum {
 	NAME_ANY,
@@ -65,7 +68,7 @@ struct hci_dev {
 	uint16_t manufacturer;
 
 	uint8_t  ssp_mode;
-	uint8_t  name[248];
+	uint8_t  name[MAX_NAME_LENGTH];
 	uint8_t  class[3];
 };
 
@@ -79,7 +82,7 @@ int adapter_get_class(struct btd_adapter *adapter, uint8_t *cls);
 
 int adapter_set_class(struct btd_adapter *adapter, uint8_t *cls);
 
-int adapter_update_ssp_mode(struct btd_adapter *adapter, int dd, uint8_t mode);
+int adapter_update_ssp_mode(struct btd_adapter *adapter, uint8_t mode);
 
 struct btd_device *adapter_get_device(DBusConnection *conn,
 				struct btd_adapter *adapter, const char *address);
@@ -88,6 +91,8 @@ struct btd_device *adapter_find_device(struct btd_adapter *adapter, const char *
 
 struct btd_device *adapter_find_connection(struct btd_adapter *adapter, uint16_t handle);
 
+void adapter_disable_svc_cache(struct btd_adapter *adapter);
+
 void adapter_remove_device(DBusConnection *conn, struct btd_adapter *adapter,
 				struct btd_device *device);
 struct btd_device *adapter_create_device(DBusConnection *conn,
@@ -95,7 +100,9 @@ struct btd_device *adapter_create_device(DBusConnection *conn,
 
 int pending_remote_name_cancel(struct btd_adapter *adapter);
 
-void remove_pending_device(struct btd_adapter *adapter);
+int adapter_resolve_names(struct btd_adapter *adapter);
+
+void clear_found_devices_list(struct btd_adapter *adapter);
 
 struct btd_adapter *adapter_create(DBusConnection *conn, int id,
 				gboolean devup);
@@ -117,7 +124,9 @@ void adapter_emit_device_found(struct btd_adapter *adapter,
 				struct remote_dev_info *dev);
 void adapter_update_oor_devices(struct btd_adapter *adapter);
 void adapter_mode_changed(struct btd_adapter *adapter, uint8_t scan_mode);
-void adapter_name_changed(struct btd_adapter *adapter, const char *name);
+void adapter_setname_complete(bdaddr_t *local, uint8_t status);
+void adapter_update_local_name(bdaddr_t *bdaddr, uint8_t status, void *ptr);
+
 struct agent *adapter_get_agent(struct btd_adapter *adapter);
 void adapter_add_connection(struct btd_adapter *adapter,
 				struct btd_device *device, uint16_t handle);
@@ -127,6 +136,9 @@ gboolean adapter_has_discov_sessions(struct btd_adapter *adapter);
 
 struct btd_adapter *btd_adapter_ref(struct btd_adapter *adapter);
 void btd_adapter_unref(struct btd_adapter *adapter);
+int set_major_and_minor_class(struct btd_adapter *adapter, uint8_t major,
+								uint8_t minor);
+
 
 struct btd_adapter_driver {
 	const char *name;
@@ -149,6 +161,8 @@ void btd_adapter_any_release_path(void);
 gboolean adapter_is_pairable(struct btd_adapter *adapter);
 gboolean adapter_powering_down(struct btd_adapter *adapter);
 
+int btd_adapter_restore_powered(struct btd_adapter *adapter);
+int btd_adapter_switch_offline(struct btd_adapter *adapter);
 
 struct btd_adapter_ops {
 	int (*setup) (void);
@@ -160,8 +174,14 @@ struct btd_adapter_ops {
 	int (*set_discoverable) (int index);
 	int (*set_limited_discoverable) (int index, const uint8_t *cls,
 						gboolean limited);
+	int (*start_discovery) (int index, gboolean periodic);
+	int (*stop_discovery) (int index);
+	int (*resolve_name) (int index, bdaddr_t *bdaddr);
+	int (*cancel_resolve_name) (int index, bdaddr_t *bdaddr);
+	int (*set_name) (int index, const char *name);
+	int (*read_name) (int index);
 };
 
 int btd_register_adapter_ops(struct btd_adapter_ops *btd_adapter_ops);
-void btd_adapter_cleanup_ops();
-int adapter_ops_setup();
+void btd_adapter_cleanup_ops(struct btd_adapter_ops *btd_adapter_ops);
+int adapter_ops_setup(void);

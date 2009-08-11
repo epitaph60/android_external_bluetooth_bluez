@@ -1,37 +1,35 @@
 
-if CONFIGFILES
-rulesdir = $(sysconfdir)/udev
+if UDEVRULES
+rulesdir = @UDEV_DATADIR@
 
-rules_DATA =
+rules_DATA = 97-bluetooth.rules
 
 if HID2HCI
-rules_DATA += bluetooth-hid2hci.rules
+rules_DATA += 97-bluetooth-hid2hci.rules
 endif
 
-if PCMCIARULES
-rules_DATA += bluetooth-serial.rules
+if PCMCIA
+rules_DATA += 97-bluetooth-serial.rules
 endif
 endif
 
-if PCMCIARULES
+if PCMCIA
 udevdir = $(libexecdir)/udev
 
 udev_SCRIPTS = bluetooth_serial
 endif
 
-EXTRA_DIST = bluetooth.init bluetooth.default bluetooth-hid2hci.rules \
-				bluetooth-serial.rules bluetooth_serial
+CLEANFILES = $(rules_DATA)
+
+EXTRA_DIST = bluetooth-hid2hci.rules bluetooth-serial.rules bluetooth_serial
 
 MAINTAINERCLEANFILES = Makefile.in
 
-if INITSCRIPTS
-install-data-local:
-	$(INSTALL) -D -m 755 $(srcdir)/bluetooth.init $(DESTDIR)$(sysconfdir)/init.d/bluetooth
-	$(mkinstalldirs) $(DESTDIR)$(sysconfdir)/default
-	[ -f $(DESTDIR)$(sysconfdir)/default/bluetooth ] || \
-		$(INSTALL_DATA) $(srcdir)/bluetooth.default $(DESTDIR)$(sysconfdir)/default/bluetooth
+97-bluetooth.rules: bluetooth.rules
+	cp $< $@
 
-uninstall-local:
-	@rm -f $(DESTDIR)$(sysconfdir)/init.d/bluetooth
-	@rm -f $(DESTDIR)$(sysconfdir)/default/bluetooth
-endif
+97-bluetooth-hid2hci.rules: bluetooth-hid2hci.rules
+	cp $< $@
+
+97-bluetooth-serial.rules: bluetooth-serial.rules
+	cp $< $@

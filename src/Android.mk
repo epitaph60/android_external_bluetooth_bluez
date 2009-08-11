@@ -16,6 +16,7 @@ LOCAL_SRC_FILES:= \
 	main.c \
 	manager.c \
 	plugin.c \
+	rfkill.c \
 	sdpd-request.c \
 	sdpd-service.c \
 	sdpd-server.c \

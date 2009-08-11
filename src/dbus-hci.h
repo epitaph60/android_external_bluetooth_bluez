@@ -23,11 +23,6 @@
  */
 
 int hcid_dbus_request_pin(int dev, bdaddr_t *sba, struct hci_conn_info *ci);
-
-void hcid_dbus_inquiry_start(bdaddr_t *local);
-void hcid_dbus_inquiry_complete(bdaddr_t *local);
-void hcid_dbus_periodic_inquiry_start(bdaddr_t *local, uint8_t status);
-void hcid_dbus_periodic_inquiry_exit(bdaddr_t *local, uint8_t status);
 void hcid_dbus_inquiry_result(bdaddr_t *local, bdaddr_t *peer, uint32_t class, int8_t rssi, uint8_t *data);
 void hcid_dbus_remote_class(bdaddr_t *local, bdaddr_t *peer, uint32_t class);
 void hcid_dbus_remote_name(bdaddr_t *local, bdaddr_t *peer, uint8_t status, char *name);
@@ -35,7 +30,6 @@ void hcid_dbus_conn_complete(bdaddr_t *local, uint8_t status, uint16_t handle, b
 void hcid_dbus_disconn_complete(bdaddr_t *local, uint8_t status, uint16_t handle, uint8_t reason);
 void hcid_dbus_bonding_process_complete(bdaddr_t *local, bdaddr_t *peer, uint8_t status);
 void hcid_dbus_simple_pairing_complete(bdaddr_t *local, bdaddr_t *peer, uint8_t status);
-void hcid_dbus_setname_complete(bdaddr_t *local);
 void hcid_dbus_setscan_enable_complete(bdaddr_t *local);
 void hcid_dbus_write_class_complete(bdaddr_t *local);
 void hcid_dbus_write_simple_pairing_mode_complete(bdaddr_t *local);
@@ -51,15 +45,6 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 				int pin_length, uint8_t old_key_type);
 
 DBusMessage *new_authentication_return(DBusMessage *msg, uint8_t status);
-
-int cancel_discovery(struct btd_adapter *adapter);
-int cancel_periodic_discovery(struct btd_adapter *adapter);
-
-int set_service_classes(int dd, const uint8_t *cls, uint8_t value);
-int set_major_and_minor_class(int dd, const uint8_t *cls,
-						uint8_t major, uint8_t minor);
-int inquiry_cancel(int dd, int to);
-int periodic_inquiry_exit(int dd, int to);
 
 const char *class_to_icon(uint32_t class);
 

@@ -16,6 +16,7 @@ LOCAL_SRC_FILES:= \
 	manager.c \
 	module-bluetooth-sink.c \
 	sink.c \
+	source.c \
 	telephony-dummy.c \
 	unix.c
 

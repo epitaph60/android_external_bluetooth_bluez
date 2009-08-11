@@ -43,6 +43,7 @@
 
 #include <gdbus.h>
 
+#include "hcid.h"
 #include "dbus-common.h"
 #include "logging.h"
 #include "adapter.h"
@@ -60,27 +61,21 @@ const char *manager_get_base_path(void)
 	return base_path;
 }
 
-int manager_update_adapter(uint16_t dev_id, uint8_t svc)
-{
-	struct btd_adapter *adapter;
-
-	adapter = manager_find_adapter_by_id(dev_id);
-	if (!adapter)
-		return -EINVAL;
-
-	return adapter_update(adapter, svc);
-}
-
-int manager_startup_complete(void)
+void manager_update_svc(const bdaddr_t *bdaddr, uint8_t svc)
 {
 	GSList *l;
+	bdaddr_t src;
 
 	for (l = adapters; l != NULL; l = l->next) {
 		struct btd_adapter *adapter = l->data;
-		adapter_update(adapter, 0);
-	}
 
-	return 0;
+		adapter_get_address(adapter, &src);
+
+		if (bacmp(bdaddr, BDADDR_ANY) != 0 && bacmp(bdaddr, &src) != 0)
+			continue;
+
+		adapter_update(adapter, svc);
+	}
 }
 
 int manager_get_adapter_class(uint16_t dev_id, uint8_t *cls)
@@ -312,6 +307,9 @@ static void manager_remove_adapter(struct btd_adapter *adapter)
 			DBUS_TYPE_INVALID);
 
 	adapter_remove(adapter);
+
+	if (adapters == NULL)
+		btd_start_exit_timer();
 }
 
 void manager_cleanup(DBusConnection *conn, const char *path)
@@ -421,6 +419,8 @@ void manager_add_adapter(const char *path)
 			DBUS_TYPE_INVALID);
 
 	manager_update_adapters();
+
+	btd_stop_exit_timer();
 }
 
 int manager_register_adapter(int id, gboolean devup)
@@ -517,4 +517,18 @@ void manager_set_default_adapter(int id)
 			"DefaultAdapterChanged",
 			DBUS_TYPE_OBJECT_PATH, &path,
 			DBUS_TYPE_INVALID);
+}
+
+void btd_manager_set_offline(gboolean offline)
+{
+	GSList *l;
+
+	for (l = adapters; l != NULL; l = g_slist_next(l)) {
+		struct btd_adapter *adapter = l->data;
+
+		if (offline)
+			btd_adapter_switch_offline(adapter);
+		else
+			btd_adapter_restore_powered(adapter);
+	}
 }

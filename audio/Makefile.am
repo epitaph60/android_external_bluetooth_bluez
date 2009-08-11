@@ -9,7 +9,8 @@ plugin_LTLIBRARIES = audio.la
 audio_la_SOURCES = main.c \
 	ipc.h ipc.c unix.h unix.c manager.h manager.c telephony.h \
 	device.h device.c headset.h headset.c gateway.h gateway.c \
-	avdtp.h avdtp.c a2dp.h a2dp.c sink.h sink.c control.h control.c
+	avdtp.h avdtp.c a2dp.h a2dp.c sink.h sink.c source.h source.c \
+	control.h control.c
 
 nodist_audio_la_SOURCES = $(BUILT_SOURCES)
 
@@ -57,7 +58,7 @@ libgstbluetooth_la_SOURCES = gstbluetooth.c \
 libgstbluetooth_la_LDFLAGS = -module -avoid-version
 libgstbluetooth_la_LIBADD = @SBC_LIBS@ @BLUEZ_LIBS@ @GSTREAMER_LIBS@ \
 						-lgstaudio-0.10 -lgstrtp-0.10
-libgstbluetooth_la_CFLAGS = -fvisibility=hidden \
+libgstbluetooth_la_CFLAGS = -fvisibility=hidden -fno-strict-aliasing \
 			 @GSTREAMER_CFLAGS@ @BLUEZ_CFLAGS@ @SBC_CFLAGS@
 endif
 endif

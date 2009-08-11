@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 
@@ -40,13 +41,16 @@
 
 #include <netinet/in.h>
 
+#include <glib.h>
+#include <dbus/dbus.h>
+
 #include "sdpd.h"
 #include "logging.h"
+#include "manager.h"
 
 static sdp_record_t *server = NULL;
 
 static uint8_t service_classes = 0x00;
-static service_classes_callback_t service_classes_callback = NULL;
 
 static uint16_t did_vendor = 0x0000;
 static uint16_t did_product = 0x0000;
@@ -154,18 +158,12 @@ static void update_svclass_list(const bdaddr_t *src)
 
 	service_classes = val;
 
-	if (service_classes_callback)
-		service_classes_callback(src, val);
+	manager_update_svc(src, val);
 }
 
 uint8_t get_service_classes(const bdaddr_t *bdaddr)
 {
 	return service_classes;
-}
-
-void set_service_classes_callback(service_classes_callback_t callback)
-{
-	service_classes_callback = callback;
 }
 
 void create_ext_inquiry_response(const char *name, uint8_t *data)
@@ -395,7 +393,7 @@ int add_record_to_server(const bdaddr_t *src, sdp_record_t *rec)
 			return -1;
 	} else {
 		if (sdp_record_find(rec->handle))
-			return -1; 
+			return -1;
 	}
 
 	debug("Adding record with handle 0x%05x", rec->handle);
@@ -447,8 +445,10 @@ int remove_record_from_server(uint32_t handle)
 	return 0;
 }
 
-// FIXME: refactor for server-side
-static sdp_record_t *extract_pdu_server(bdaddr_t *device, uint8_t *p, unsigned int bufsize, uint32_t handleExpected, int *scanned)
+/* FIXME: refactor for server-side */
+static sdp_record_t *extract_pdu_server(bdaddr_t *device, uint8_t *p,
+					unsigned int bufsize,
+					uint32_t handleExpected, int *scanned)
 {
 	int extractStatus = -1, localExtractedLength = 0;
 	uint8_t dtd;
@@ -472,7 +472,8 @@ static sdp_record_t *extract_pdu_server(bdaddr_t *device, uint8_t *p, unsigned i
 	SDPDBG("Look ahead attr id : %d", lookAheadAttrId);
 
 	if (lookAheadAttrId == SDP_ATTR_RECORD_HANDLE) {
-		if (bufsize < (sizeof(uint8_t) * 2) + sizeof(uint16_t) + sizeof(uint32_t)) {
+		if (bufsize < (sizeof(uint8_t) * 2) +
+					sizeof(uint16_t) + sizeof(uint32_t)) {
 			SDPDBG("Unexpected end of packet");
 			return NULL;
 		}
@@ -508,12 +509,13 @@ static sdp_record_t *extract_pdu_server(bdaddr_t *device, uint8_t *p, unsigned i
 			break;
 		}
 
-		SDPDBG("Extract PDU, sequenceLength: %d localExtractedLength: %d", seqlen, localExtractedLength);
+		SDPDBG("Extract PDU, sequenceLength: %d localExtractedLength: %d",
+							seqlen, localExtractedLength);
 		dtd = *(uint8_t *) p;
 
 		attrId = ntohs(bt_get_unaligned((uint16_t *) (p + attrSize)));
 		attrSize += sizeof(uint16_t);
-		
+
 		SDPDBG("DTD of attrId : %d Attr id : 0x%x", dtd, attrId);
 
 		pAttr = sdp_extract_attr(p + attrSize, bufsize - attrSize,
@@ -594,9 +596,9 @@ success:
 	/* if the browse group descriptor is NULL,
 	 * ensure that the record belongs to the ROOT group */
 	if (sdp_data_get(rec, SDP_ATTR_BROWSE_GRP_LIST) == NULL) {
-		 uuid_t uuid;
-		 sdp_uuid16_create(&uuid, PUBLIC_BROWSE_GROUP);
-		 sdp_pattern_add_uuid(rec, &uuid);
+		uuid_t uuid;
+		sdp_uuid16_create(&uuid, PUBLIC_BROWSE_GROUP);
+		sdp_pattern_add_uuid(rec, &uuid);
 	}
 
 	update_db_timestamp();
@@ -620,7 +622,7 @@ invalid:
  */
 int service_update_req(sdp_req_t *req, sdp_buf_t *rsp)
 {
-	sdp_record_t *orec;
+	sdp_record_t *orec, *nrec;
 	int status = 0, scanned = 0;
 	uint8_t *p = req->buf + sizeof(sdp_pdu_hdr_t);
 	int bufsize = req->len - sizeof(sdp_pdu_hdr_t);
@@ -635,26 +637,23 @@ int service_update_req(sdp_req_t *req, sdp_buf_t *rsp)
 
 	SDPDBG("SvcRecOld: %p", orec);
 
-	if (orec) {
-		sdp_record_t *nrec = extract_pdu_server(BDADDR_ANY, p, bufsize, handle, &scanned);
-		if (nrec && handle == nrec->handle) {
-			update_db_timestamp();
-			update_svclass_list(BDADDR_ANY);
-		} else {
-			SDPDBG("SvcRecHandle : 0x%x", handle);
-			SDPDBG("SvcRecHandleNew : 0x%x", nrec->handle);
-			SDPDBG("SvcRecNew : %p", nrec);
-			SDPDBG("SvcRecOld : %p", orec);
-			SDPDBG("Failure to update, restore old value");
-
-			status = SDP_INVALID_SYNTAX;
-		}
-
-		if (nrec)
-			sdp_record_free(nrec);
-	} else
+	if (!orec) {
 		status = SDP_INVALID_RECORD_HANDLE;
+		goto done;
+	}
 
+	nrec = extract_pdu_server(BDADDR_ANY, p, bufsize, handle, &scanned);
+	if (!nrec) {
+		status = SDP_INVALID_SYNTAX;
+		goto done;
+	}
+
+	assert(nrec == orec);
+
+	update_db_timestamp();
+	update_svclass_list(BDADDR_ANY);
+
+done:
 	p = rsp->data;
 	bt_put_unaligned(htons(status), (uint16_t *) p);
 	rsp->data_size = sizeof(uint16_t);

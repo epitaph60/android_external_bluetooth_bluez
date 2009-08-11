@@ -136,7 +136,7 @@ static int unix_sendmsg_fd(int sock, int fd)
 	cmsg->cmsg_type = SCM_RIGHTS;
 	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
 	/* Initialize the payload */
-	(*(int *) CMSG_DATA(cmsg)) = fd;
+	memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
 
 	return sendmsg(sock, &msgh, MSG_NOSIGNAL);
 }
@@ -231,12 +231,18 @@ static uint8_t headset_generate_capability(struct audio_device *dev,
 
 	pcm = (void *) codec;
 	pcm->sampling_rate = 8000;
-	if (dev->headset && headset_get_nrec(dev))
+	if (dev->headset) {
+		if (headset_get_nrec(dev))
+			pcm->flags |= BT_PCM_FLAG_NREC;
+		if (!headset_get_sco_hci(dev))
+			pcm->flags |= BT_PCM_FLAG_PCM_ROUTING;
+		codec->configured = headset_is_active(dev);
+		codec->lock = headset_get_lock(dev);
+	} else {
 		pcm->flags |= BT_PCM_FLAG_NREC;
-	if (!headset_get_sco_hci(dev))
-		pcm->flags |= BT_PCM_FLAG_PCM_ROUTING;
-	codec->configured = headset_is_active(dev);
-	codec->lock = headset_get_lock(dev);
+		codec->configured = TRUE;
+		codec->lock = 0;
+	}
 
 	return codec->length;
 }
@@ -876,6 +882,7 @@ static void start_open(struct audio_device *dev, struct unix_client *client)
 
 	switch (client->type) {
 	case TYPE_SINK:
+	case TYPE_SOURCE:
 		a2dp = &client->d.a2dp;
 
 		if (!a2dp->session)
@@ -897,7 +904,7 @@ static void start_open(struct audio_device *dev, struct unix_client *client)
 			goto failed;
 		}
 
-		a2dp->sep = a2dp_source_get(a2dp->session, rsep);
+		a2dp->sep = a2dp_get(a2dp->session, rsep);
 		if (!a2dp->sep) {
 			error("seid %d not available or locked", client->seid);
 			goto failed;
@@ -926,6 +933,8 @@ static void start_open(struct audio_device *dev, struct unix_client *client)
 		}
 		break;
 
+        case TYPE_GATEWAY:
+                break;
 	default:
 		error("No known services for device");
 		goto failed;
@@ -949,6 +958,7 @@ static void start_config(struct audio_device *dev, struct unix_client *client)
 
 	switch (client->type) {
 	case TYPE_SINK:
+	case TYPE_SOURCE:
 		a2dp = &client->d.a2dp;
 
 		if (!a2dp->session)
@@ -964,10 +974,9 @@ static void start_config(struct audio_device *dev, struct unix_client *client)
 			goto failed;
 		}
 
-		id = a2dp_source_config(a2dp->session, a2dp->sep,
-					a2dp_config_complete, client->caps,
-					client);
-		client->cancel = a2dp_source_cancel;
+		id = a2dp_config(a2dp->session, a2dp->sep, a2dp_config_complete,
+					client->caps, client);
+		client->cancel = a2dp_cancel;
 		break;
 
 	case TYPE_HEADSET:
@@ -1016,6 +1025,7 @@ static void start_resume(struct audio_device *dev, struct unix_client *client)
 
 	switch (client->type) {
 	case TYPE_SINK:
+	case TYPE_SOURCE:
 		a2dp = &client->d.a2dp;
 
 		if (!a2dp->session)
@@ -1031,9 +1041,9 @@ static void start_resume(struct audio_device *dev, struct unix_client *client)
 			goto failed;
 		}
 
-		id = a2dp_source_resume(a2dp->session, a2dp->sep,
-					a2dp_resume_complete, client);
-		client->cancel = a2dp_source_cancel;
+		id = a2dp_resume(a2dp->session, a2dp->sep, a2dp_resume_complete,
+					client);
+		client->cancel = a2dp_cancel;
 
 		break;
 
@@ -1084,6 +1094,7 @@ static void start_suspend(struct audio_device *dev, struct unix_client *client)
 
 	switch (client->type) {
 	case TYPE_SINK:
+	case TYPE_SOURCE:
 		a2dp = &client->d.a2dp;
 
 		if (!a2dp->session)
@@ -1099,9 +1110,9 @@ static void start_suspend(struct audio_device *dev, struct unix_client *client)
 			goto failed;
 		}
 
-		id = a2dp_source_suspend(a2dp->session, a2dp->sep,
+		id = a2dp_suspend(a2dp->session, a2dp->sep,
 					a2dp_suspend_complete, client);
-		client->cancel = a2dp_source_cancel;
+		client->cancel = a2dp_cancel;
 		break;
 
 	case TYPE_HEADSET:
@@ -1175,6 +1186,8 @@ static void start_close(struct audio_device *dev, struct unix_client *client,
 			hs->locked = FALSE;
 		}
 		break;
+        case TYPE_GATEWAY:
+                break;
 	case TYPE_SOURCE:
 	case TYPE_SINK:
 		a2dp = &client->d.a2dp;
@@ -1275,7 +1288,8 @@ static int handle_sco_open(struct unix_client *client, struct bt_open_req *req)
 {
 	if (!client->interface)
 		client->interface = g_strdup(AUDIO_HEADSET_INTERFACE);
-	else if (!g_str_equal(client->interface, AUDIO_HEADSET_INTERFACE))
+	else if (!g_str_equal(client->interface, AUDIO_HEADSET_INTERFACE) &&
+		!g_str_equal(client->interface, AUDIO_GATEWAY_INTERFACE))
 		return -EIO;
 
 	debug("open sco - object=%s source=%s destination=%s lock=%s%s",
@@ -1354,7 +1368,7 @@ static void handle_open_req(struct unix_client *client, struct bt_open_req *req)
 	return;
 
 failed:
-	unix_ipc_error(client, BT_SET_CONFIGURATION, err ? : EIO);
+	unix_ipc_error(client, BT_OPEN, err ? : EIO);
 }
 
 static int handle_sco_transport(struct unix_client *client,
@@ -1702,9 +1716,14 @@ int unix_init(void)
 
 	set_nonblocking(sk);
 
-	unix_sock = sk;
+	if (listen(sk, 1) < 0) {
+		error("Can't listen on unix socket: %s (%d)",
+						strerror(errno), errno);
+		close(sk);
+		return -1;
+	}
 
-	listen(sk, 1);
+	unix_sock = sk;
 
 	io = g_io_channel_unix_new(sk);
 	g_io_add_watch(io, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,

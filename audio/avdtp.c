@@ -52,6 +52,7 @@
 #include "glib-helper.h"
 #include "btio.h"
 #include "sink.h"
+#include "source.h"
 
 #include <bluetooth/l2cap.h>
 
@@ -575,6 +576,20 @@ static void pending_req_free(struct pending_req *req)
 	g_free(req);
 }
 
+static void close_stream(struct avdtp_stream *stream)
+{
+	int sock;
+
+	if (stream->io == NULL)
+		return;
+
+	sock = g_io_channel_unix_get_fd(stream->io);
+
+	shutdown(sock, SHUT_RDWR);
+
+	g_io_channel_shutdown(stream->io, FALSE, NULL);
+}
+
 static gboolean stream_close_timeout(gpointer user_data)
 {
 	struct avdtp_stream *stream = user_data;
@@ -583,7 +598,7 @@ static gboolean stream_close_timeout(gpointer user_data)
 
 	stream->timer = 0;
 
-	g_io_channel_shutdown(stream->io, FALSE, NULL);
+	close_stream(stream);
 
 	return FALSE;
 }
@@ -609,8 +624,6 @@ static gboolean disconnect_timeout(gpointer user_data)
 	struct audio_device *dev;
 	gboolean stream_setup;
 
-	assert(session->ref == 1);
-
 	session->dc_timer = 0;
 	stream_setup = session->stream_setup;
 	session->stream_setup = FALSE;
@@ -619,6 +632,8 @@ static gboolean disconnect_timeout(gpointer user_data)
 
 	if (dev && dev->sink && stream_setup)
 		sink_setup_stream(dev->sink, session);
+	else if (dev && dev->source && stream_setup)
+		source_setup_stream(dev->source, session);
 	else
 		connection_lost(session, ETIMEDOUT);
 
@@ -776,7 +791,7 @@ static gboolean transport_cb(GIOChannel *chan, GIOCondition cond,
 				sep->user_data);
 
 	if (!(cond & G_IO_NVAL))
-		g_io_channel_shutdown(stream->io, FALSE, NULL);
+		close_stream(stream);
 
 	avdtp_sep_set_state(stream->session, sep, AVDTP_STATE_IDLE);
 
@@ -977,6 +992,11 @@ static void connection_lost(struct avdtp *session, int err)
 		g_source_remove(session->io_id);
 		session->io_id = 0;
 	}
+
+	if (session->dc_timer)
+		remove_disconnect_timer(session);
+
+	session->auto_dc = TRUE;
 
 	if (session->ref != 1)
 		error("connection_lost: ref count not 1 after all callbacks");
@@ -1809,7 +1829,7 @@ static gboolean session_cb(GIOChannel *chan, GIOCondition cond,
 			goto failed;
 		}
 
-		if (session->ref == 1 && !session->streams)
+		if (session->ref == 1 && !session->streams && !session->req)
 			set_disconnect_timer(session);
 
 		if (session->streams && session->dc_timer)
@@ -2096,7 +2116,7 @@ static void avdtp_confirm_cb(GIOChannel *chan, gpointer data)
 
 	session->io_id = g_io_add_watch(chan, G_IO_ERR | G_IO_HUP | G_IO_NVAL,
 					(GIOFunc) session_cb, session);
-	perr = btd_request_authorization(&src, &dst, ADVANCED_AUDIO_UUID,
+	perr = audio_device_request_authorization(dev, ADVANCED_AUDIO_UUID,
 							auth_cb, session);
 	if (perr < 0) {
 		avdtp_unref(session);
@@ -2451,7 +2471,7 @@ static gboolean avdtp_close_resp(struct avdtp *session,
 
 	avdtp_sep_set_state(session, sep, AVDTP_STATE_CLOSING);
 
-	g_io_channel_shutdown(stream->io, TRUE, NULL);
+	close_stream(stream);
 
 	return TRUE;
 }

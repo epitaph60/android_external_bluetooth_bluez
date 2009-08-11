@@ -460,7 +460,7 @@ static int scan_enable(uint8_t *data)
 
 	baswap(&ba, &vdev.bdaddr);
 	sa.sin_family = AF_INET;
-	sa.sin_addr.s_addr = *(uint32_t *) &ba;
+	memcpy(&sa.sin_addr.s_addr, &ba, sizeof(sa.sin_addr.s_addr));
 	sa.sin_port = *(uint16_t *) &ba.b[4];
 	if (bind(sk, (struct sockaddr *) &sa, sizeof(sa))) {
 		syslog(LOG_ERR, "Can't bind socket: %s (%d)",
@@ -519,7 +519,7 @@ static void disconnect(uint8_t *data)
 
 	handle = btohs(cp->handle);
 
-	if (handle - 1 > VHCI_MAX_CONN)
+	if (handle > VHCI_MAX_CONN)
 		return;
 
 	if (!(conn = vconn[handle-1]))
@@ -567,7 +567,7 @@ do_connect:
 
 	baswap(&ba, &cp->bdaddr);
 	sa.sin_family = AF_INET;
-	sa.sin_addr.s_addr = *(uint32_t *) &ba;
+	memcpy(&sa.sin_addr.s_addr, &ba, sizeof(sa.sin_addr.s_addr));
 	sa.sin_port = *(uint16_t *) &ba.b[4];
 	if (connect(sk, (struct sockaddr *) &sa, sizeof(sa)) < 0) {
 		syslog(LOG_ERR, "Can't connect: %s (%d)",
@@ -1173,7 +1173,13 @@ static void usage(void)
 {
 	printf("hciemu - HCI emulator ver %s\n", VERSION);
 	printf("Usage: \n");
-	printf("\thciemu [-n] local_address\n");
+	printf("\thciemu [options] local_address\n"
+		"Options:\n"
+		"\t[-d device] use specified device\n"
+		"\t[-b bdaddr] emulate specified address\n"
+		"\t[-s file] create snoop file\n"
+		"\t[-n] do not detach\n"
+		"\t[-h] help, you are looking at it\n");
 }
 
 static struct option main_options[] = {

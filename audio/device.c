@@ -58,6 +58,7 @@
 #include "headset.h"
 #include "gateway.h"
 #include "sink.h"
+#include "source.h"
 
 #define AUDIO_INTERFACE "org.bluez.Audio"
 
@@ -71,12 +72,18 @@ typedef enum {
 	AUDIO_STATE_CONNECTED,
 } audio_state_t;
 
+struct service_auth {
+	service_auth_cb cb;
+	void *user_data;
+};
+
 struct dev_priv {
 	audio_state_t state;
 
 	headset_state_t hs_state;
 	sink_state_t sink_state;
 	avctp_state_t avctp_state;
+	GSList *auths;
 
 	DBusMessage *conn_req;
 	DBusMessage *dc_req;
@@ -409,7 +416,7 @@ static void device_headset_cb(struct audio_device *dev,
 			sink_shutdown(dev->sink);
 			break;
 		}
-		if (priv->sink_state == AVDTP_SESSION_STATE_DISCONNECTED)
+		if (priv->sink_state == SINK_STATE_DISCONNECTED)
 			device_set_state(dev, AUDIO_STATE_DISCONNECTED);
 		else if (old_state == HEADSET_STATE_CONNECT_IN_PROGRESS &&
 				(priv->sink_state == SINK_STATE_CONNECTED ||
@@ -502,7 +509,7 @@ static DBusMessage *dev_disconnect(DBusConnection *conn, DBusMessage *msg,
 	priv->dc_req = dbus_message_ref(msg);
 
 	if (priv->hs_state != HEADSET_STATE_DISCONNECTED)
-		headset_set_state(dev, HEADSET_STATE_DISCONNECTED);
+		headset_shutdown(dev);
 	else if (dev->sink && priv->sink_state != SINK_STATE_DISCONNECTED)
 		sink_shutdown(dev->sink);
 	else {
@@ -645,6 +652,9 @@ void audio_device_unregister(struct audio_device *device)
 	if (device->sink)
 		sink_unregister(device);
 
+	if (device->source)
+		source_unregister(device);
+
 	if (device->control)
 		control_unregister(device);
 
@@ -652,4 +662,47 @@ void audio_device_unregister(struct audio_device *device)
 						AUDIO_INTERFACE);
 
 	device_free(device);
+}
+
+static void auth_cb(DBusError *derr, void *user_data)
+{
+	struct audio_device *dev = user_data;
+	struct dev_priv *priv = dev->priv;
+
+	while (priv->auths) {
+		struct service_auth *auth = priv->auths->data;
+
+		auth->cb(derr, auth->user_data);
+		priv->auths = g_slist_remove(priv->auths, auth);
+		g_free(auth);
+	}
+}
+
+int audio_device_request_authorization(struct audio_device *dev,
+					const char *uuid, service_auth_cb cb,
+					void *user_data)
+{
+	struct dev_priv *priv = dev->priv;
+	struct service_auth *auth;
+	int err;
+
+	auth = g_try_new0(struct service_auth, 1);
+	if (!auth)
+		return -ENOMEM;
+
+	auth->cb = cb;
+	auth->user_data = user_data;
+
+	priv->auths = g_slist_append(priv->auths, auth);
+	if (g_slist_length(priv->auths) > 1)
+		return 0;
+
+	err = btd_request_authorization(&dev->src, &dev->dst, uuid, auth_cb,
+					dev);
+	if (err < 0) {
+		priv->auths = g_slist_remove(priv->auths, auth);
+		g_free(auth);
+	}
+
+	return err;
 }
