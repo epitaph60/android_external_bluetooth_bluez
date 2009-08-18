@@ -160,7 +160,9 @@ struct avctp_server {
 	bdaddr_t src;
 	GIOChannel *io;
 	uint32_t tg_record_id;
+#ifndef ANDROID
 	uint32_t ct_record_id;
+#endif
 };
 
 struct control {
@@ -835,6 +837,7 @@ int avrcp_register(DBusConnection *conn, const bdaddr_t *src, GKeyFile *config)
 	}
 	server->tg_record_id = record->handle;
 
+#ifndef ANDROID
 	record = avrcp_ct_record();
 	if (!record) {
 		error("Unable to allocate new service record");
@@ -847,10 +850,13 @@ int avrcp_register(DBusConnection *conn, const bdaddr_t *src, GKeyFile *config)
 		return -1;
 	}
 	server->ct_record_id = record->handle;
+#endif
 
 	server->io = avctp_server_socket(src, master);
 	if (!server->io) {
+#ifndef ANDROID
 		remove_record_from_server(server->ct_record_id);
+#endif
 		remove_record_from_server(server->tg_record_id);
 		g_free(server);
 		return -1;
@@ -887,7 +893,9 @@ void avrcp_unregister(const bdaddr_t *src)
 
 	servers = g_slist_remove(servers, server);
 
+#ifndef ANDROID
 	remove_record_from_server(server->ct_record_id);
+#endif
 	remove_record_from_server(server->tg_record_id);
 
 	g_io_channel_shutdown(server->io, TRUE, NULL);
