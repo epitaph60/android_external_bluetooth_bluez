@@ -8,7 +8,7 @@ LOCAL_SRC_FILES:= \
 	lexer.c
 
 LOCAL_CFLAGS:= \
-	-DVERSION=\"4.40\" \
+	-DVERSION=\"4.47\" \
 	-DCONFIGDIR=\"/etc/bluez\" \
 	-DNEED_PPOLL
 

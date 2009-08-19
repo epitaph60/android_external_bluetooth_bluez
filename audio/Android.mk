@@ -21,7 +21,7 @@ LOCAL_SRC_FILES:= \
 	unix.c
 
 LOCAL_CFLAGS:= \
-	-DVERSION=\"4.40\" \
+	-DVERSION=\"4.47\" \
 	-DSTORAGEDIR=\"/data/misc/bluetoothd\" \
 	-DCONFIGDIR=\"/etc/bluez\" \
 	-DANDROID \
