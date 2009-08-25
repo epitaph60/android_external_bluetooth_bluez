@@ -749,9 +749,6 @@ static DBusMessage *get_service_attribute_value(DBusConnection *conn,
 	uint16_t attrId;
 	int err;
 
-	if (device->browse)
-		return g_dbus_create_error(msg, ERROR_INTERFACE ".InProgress",
-						"Discover in progress");
 	if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &pattern,
 					DBUS_TYPE_UINT16, &attrId,
 					DBUS_TYPE_INVALID) == FALSE)
