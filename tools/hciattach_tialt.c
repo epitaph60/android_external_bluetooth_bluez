@@ -263,9 +263,8 @@ int texasalt_init(int fd, int speed, struct termios *ti)
 				brf_chip);
 
 		sprintf(fw, "/etc/firmware/%s.bin", c_brf_chip[brf_chip]);
-		texas_load_firmware(fd, fw);
-
 		texas_change_speed(fd, ti, speed);
+		texas_load_firmware(fd, fw);
 	}
 	nanosleep(&tm, NULL);
 	return 0;
