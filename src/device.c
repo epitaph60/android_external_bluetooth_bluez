@@ -2144,6 +2144,20 @@ static void passkey_cb(struct agent *agent, DBusError *err, uint32_t passkey,
 	auth->cb = NULL;
 }
 
+static void pairing_consent_cb(struct agent *agent, DBusError *err, void *data)
+{
+	struct authentication_req *auth = data;
+	struct btd_device *device = auth->device;
+
+	/* No need to reply anything if the authentication already failed */
+	if (!auth->cb)
+		return;
+
+	((agent_cb) auth->cb)(agent, err, device);
+
+	auth->cb = NULL;
+}
+
 int device_request_authentication(struct btd_device *device, auth_type_t type,
 				uint32_t passkey, void *cb)
 {
@@ -2189,6 +2203,10 @@ int device_request_authentication(struct btd_device *device, auth_type_t type,
 	case AUTH_TYPE_AUTO:
 		ret = 0;
 		break;
+	case AUTH_TYPE_PAIRING_CONSENT:
+		ret = agent_request_pairing_consent(agent, device,
+							pairing_consent_cb, auth, NULL);
+		break;
 	default:
 		ret = -EINVAL;
 	}
@@ -2223,6 +2241,9 @@ static void cancel_authentication(struct authentication_req *auth)
 		break;
 	case AUTH_TYPE_PASSKEY:
 		((agent_passkey_cb) auth->cb)(agent, &err, 0, device);
+		break;
+	case AUTH_TYPE_PAIRING_CONSENT:
+		((agent_cb) auth->cb) (agent, &err, device);
 		break;
 	case AUTH_TYPE_NOTIFY:
 	case AUTH_TYPE_AUTO:

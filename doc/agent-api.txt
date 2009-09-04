@@ -68,6 +68,17 @@ Methods		void Release()
 			Possible errors: org.bluez.Error.Rejected
 			                 org.bluez.Error.Canceled
 
+		void RequestPairingConsent(object device)
+
+			This method gets called when the service daemon
+			needs to confirm an incoming pairing request.
+
+			To accept it should return an empty reply
+			or an error to reject.
+
+			Possible errors: org.bluez.Error.Rejected
+			                 org.bluez.Error.Canceled
+
 		void Authorize(object device, string uuid)
 
 			This method gets called when the service daemon

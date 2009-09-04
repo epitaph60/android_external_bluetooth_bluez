@@ -273,6 +273,34 @@ static void passkey_cb(struct agent *agent, DBusError *err, uint32_t passkey,
 	hci_close_dev(dd);
 }
 
+static void pairing_consent_cb(struct agent *agent, DBusError *err,
+					void *user_data)
+{
+	struct btd_device *device = user_data;
+	struct btd_adapter *adapter = device_get_adapter(device);
+	user_confirm_reply_cp cp;
+	int dd;
+	uint16_t dev_id = adapter_get_dev_id(adapter);
+
+	dd = hci_open_dev(dev_id);
+	if (dd < 0) {
+		error("Unable to open hci%d", dev_id);
+		return;
+	}
+
+	memset(&cp, 0, sizeof(cp));
+	device_get_address(device, &cp.bdaddr);
+
+	if (err)
+		hci_send_cmd(dd, OGF_LINK_CTL, OCF_USER_CONFIRM_NEG_REPLY,
+					USER_CONFIRM_REPLY_CP_SIZE, &cp);
+	else
+		hci_send_cmd(dd, OGF_LINK_CTL, OCF_USER_CONFIRM_REPLY,
+					USER_CONFIRM_REPLY_CP_SIZE, &cp);
+
+	hci_close_dev(dd);
+}
+
 static int get_auth_requirements(bdaddr_t *local, bdaddr_t *remote,
 							uint8_t *auth)
 {
@@ -345,6 +373,20 @@ int hcid_dbus_user_confirm(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey)
 
 	debug("remote IO capabilities are 0x%02x", remcap);
 	debug("remote authentication requirement is 0x%02x", remauth);
+
+	/* If local IO capabilities are DisplayYesNo and remote IO
+	 * capabiltiies are DisplayOnly or NoInputNoOutput;
+	 * call PairingConsent callback for incoming requests. */
+	struct agent *agent = NULL;
+	agent = device_get_agent(device);
+	if (!agent) {
+		agent = adapter_get_agent(adapter);
+		if ((agent_get_io_capability(agent) & 0x01) &&
+		            (remcap == 0x00 || remcap == 0x03))
+			return device_request_authentication(device,
+					AUTH_TYPE_PAIRING_CONSENT, 0,
+					pairing_consent_cb);
+	}
 
 	/* If no side requires MITM protection; auto-accept */
 	if (!(remauth & 0x01) &&

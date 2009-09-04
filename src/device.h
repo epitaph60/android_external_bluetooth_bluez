@@ -32,6 +32,7 @@ typedef enum {
 	AUTH_TYPE_CONFIRM,
 	AUTH_TYPE_NOTIFY,
 	AUTH_TYPE_AUTO,
+	AUTH_TYPE_PAIRING_CONSENT,
 } auth_type_t;
 
 struct btd_device *device_create(DBusConnection *conn, struct btd_adapter *adapter,
