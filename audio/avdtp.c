@@ -2278,6 +2278,8 @@ static gboolean request_timeout(gpointer user_data)
 		goto failed;
 	}
 
+	stream->abort_int = TRUE;
+
 	goto done;
 
 failed:
@@ -3248,8 +3250,7 @@ int avdtp_abort(struct avdtp *session, struct avdtp_stream *stream)
 	ret = send_request(session, TRUE, stream, AVDTP_ABORT,
 							&req, sizeof(req));
 	if (ret == 0)
-		avdtp_sep_set_state(session, stream->lsep,
-					AVDTP_STATE_ABORTING);
+		stream->abort_int = TRUE;
 
 	return ret;
 }
