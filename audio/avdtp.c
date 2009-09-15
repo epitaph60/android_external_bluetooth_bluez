@@ -2269,6 +2269,9 @@ static gboolean request_timeout(gpointer user_data)
 		goto failed;
 	}
 
+	if (!stream)
+		goto failed;
+
 	memset(&sreq, 0, sizeof(sreq));
 	sreq.acp_seid = seid;
 
