@@ -937,6 +937,7 @@ static int wait_for_start(struct bluetooth_data *data, int timeout)
 static void* a2dp_thread(void *d)
 {
 	struct bluetooth_data* data = (struct bluetooth_data*)d;
+	a2dp_command_t command = A2DP_CMD_NONE;
 
 	DBG("a2dp_thread started");
 	prctl(PR_SET_NAME, "a2dp_thread", 0, 0, 0);
@@ -948,10 +949,21 @@ static void* a2dp_thread(void *d)
 
 	while (1)
 	{
-		a2dp_command_t command;
+		while (1) {
+			pthread_cond_wait(&data->thread_wait, &data->mutex);
 
-		pthread_cond_wait(&data->thread_wait, &data->mutex);
-		command = data->command;
+			/* Initialization needed */
+			if (data->state == A2DP_STATE_NONE &&
+			    data->command != A2DP_CMD_QUIT) {
+				bluetooth_init(data);
+			}
+
+			/* New state command signaled */
+			if (command != data->command) {
+				command = data->command;
+				break;
+			}
+		}
 
 		switch (command) {
 			case A2DP_CMD_INIT:
@@ -1010,6 +1022,7 @@ int a2dp_init(int rate, int channels, a2dpData* dataPtr)
 	data->server.fd = -1;
 	data->stream.fd = -1;
 	data->state = A2DP_STATE_NONE;
+	data->command = A2DP_CMD_NONE;
 
 	strncpy(data->address, "00:00:00:00:00:00", 18);
 	data->rate = rate;
