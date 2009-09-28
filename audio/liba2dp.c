@@ -880,10 +880,8 @@ error:
 
 static void set_state(struct bluetooth_data *data, a2dp_state_t state)
 {
-	pthread_mutex_lock(&data->mutex);
 	data->state = state;
 	pthread_cond_signal(&data->client_wait);
-	pthread_mutex_unlock(&data->mutex);
 }
 
 static void set_command(struct bluetooth_data *data, a2dp_command_t command)
@@ -943,18 +941,17 @@ static void* a2dp_thread(void *d)
 	DBG("a2dp_thread started");
 	prctl(PR_SET_NAME, "a2dp_thread", 0, 0, 0);
 
+	pthread_mutex_lock(&data->mutex);
+
+	data->started = 1;
+	pthread_cond_signal(&data->thread_start);
+
 	while (1)
 	{
 		a2dp_command_t command;
 
-		pthread_mutex_lock(&data->mutex);
-		if (!data->started) {
-			data->started = 1;
-			pthread_cond_signal(&data->thread_start);
-		}
 		pthread_cond_wait(&data->thread_wait, &data->mutex);
 		command = data->command;
-		pthread_mutex_unlock(&data->mutex);
 
 		switch (command) {
 			case A2DP_CMD_INIT:
@@ -992,6 +989,7 @@ static void* a2dp_thread(void *d)
 	}
 
 done:
+	pthread_mutex_unlock(&data->mutex);
 	DBG("a2dp_thread finished");
 	return NULL;
 }
@@ -1038,9 +1036,13 @@ int a2dp_init(int rate, int channels, a2dpData* dataPtr)
 		goto error;
 	}
 
+	/* Make sure the state machine is ready and waiting */
 	while (!data->started) {
 		pthread_cond_wait(&data->thread_start, &data->mutex);
 	}
+
+	/* Poke the state machine to get it going */
+	pthread_cond_signal(&data->thread_wait);
 
 	pthread_mutex_unlock(&data->mutex);
 
