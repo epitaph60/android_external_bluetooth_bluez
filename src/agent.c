@@ -757,7 +757,7 @@ int agent_request_pairing_consent(struct agent *agent, struct btd_device *device
 	return 0;
 
 failed:
-	agent_request_free(req);
+	agent_request_free(req, FALSE);
 	return err;
 }
 
