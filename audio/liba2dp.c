@@ -1001,11 +1001,6 @@ static void* a2dp_thread(void *d)
 		}
 
 		switch (command) {
-			case A2DP_CMD_INIT:
-				if (data->state != A2DP_STATE_NONE)
-					break;
-				bluetooth_init(data);
-				break;
 			case A2DP_CMD_CONFIGURE:
 				if (data->state != A2DP_STATE_INITIALIZED)
 					break;
@@ -1030,6 +1025,8 @@ static void* a2dp_thread(void *d)
 				a2dp_free(data);
 				goto done;
 
+			case A2DP_CMD_INIT:
+				/* already called bluetooth_init() */
 			default:
 				break;
 		}
