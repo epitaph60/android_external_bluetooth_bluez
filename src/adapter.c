@@ -1660,6 +1660,109 @@ static DBusMessage *unregister_agent(DBusConnection *conn,
 	return dbus_message_new_method_return(msg);
 }
 
+static sdp_record_t *create_rfcomm_record(struct btd_adapter *adapter,
+					const char *name, uuid_t uuid, uint8_t channel)
+{
+	uuid_t root_uuid, l2cap_uuid, rfcomm_uuid;
+	sdp_list_t *svclass, *root, *proto;
+	sdp_record_t *record;
+
+	record = sdp_record_alloc();
+	if (!record)
+		return NULL;
+
+	sdp_uuid16_create(&root_uuid, PUBLIC_BROWSE_GROUP);
+	root = sdp_list_append(NULL, &root_uuid);
+	sdp_set_browse_groups(record, root);
+
+	sdp_uuid16_create(&l2cap_uuid, L2CAP_UUID);
+	proto = sdp_list_append(NULL, sdp_list_append(NULL, &l2cap_uuid));
+
+	sdp_uuid16_create(&rfcomm_uuid, RFCOMM_UUID);
+	proto = sdp_list_append(proto, sdp_list_append(
+			sdp_list_append(NULL, &rfcomm_uuid),
+			sdp_data_alloc(SDP_UINT8, &channel)));
+
+	sdp_set_access_protos(record, sdp_list_append(NULL, proto));
+
+	svclass = sdp_list_append(NULL, &uuid);
+	sdp_set_service_classes(record, svclass);
+
+	sdp_set_info_attr(record, name, NULL, NULL);
+
+	return record;
+}
+
+static DBusMessage *add_rfcomm_service_record(DBusConnection *conn,
+					DBusMessage *msg, void *data)
+{
+	uuid_t uuid;
+	const char *name;
+	uint8_t channel;
+	uint32_t *uuid_p;
+	uint32_t uuid_net[4];   // network order
+	uint64_t uuid_host[2];  // host
+	sdp_record_t *record;
+	struct btd_adapter *adapter = data;
+
+	DBusMessage *reply;
+
+	if (!dbus_message_get_args(msg, NULL,
+			DBUS_TYPE_STRING, &name,
+			DBUS_TYPE_UINT64, &uuid_host[0],
+			DBUS_TYPE_UINT64, &uuid_host[1],
+			DBUS_TYPE_UINT16, &channel,
+			DBUS_TYPE_INVALID))
+		return invalid_args(msg);
+
+	uuid_p = (uint32_t *)uuid_host;
+	uuid_net[1] = htonl(*uuid_p++);
+	uuid_net[0] = htonl(*uuid_p++);
+	uuid_net[3] = htonl(*uuid_p++);
+	uuid_net[2] = htonl(*uuid_p++);
+
+	sdp_uuid128_create(&uuid, (void *)uuid_net);
+
+	record = create_rfcomm_record(adapter, name, uuid, channel);
+
+	if (!record)
+		return g_dbus_create_error(msg,
+				ERROR_INTERFACE ".Failed",
+				"Failed to create sdp record");
+
+	if (add_record_to_server(&adapter->bdaddr, record))
+		return g_dbus_create_error(msg,
+				ERROR_INTERFACE ".Failed",
+				"Failed to register sdp record");
+
+	printf("npelly new handle %X\n", record->handle);
+	reply = dbus_message_new_method_return(msg);
+	dbus_message_append_args(reply,
+			DBUS_TYPE_UINT32, &record->handle,
+			DBUS_TYPE_INVALID);
+
+	return reply;
+}
+
+static DBusMessage *remove_service_record(DBusConnection *conn,
+					DBusMessage *msg, void *data)
+{
+	struct btd_adapter *adapter = data;
+	dbus_uint32_t handle;
+
+	if (!dbus_message_get_args(msg, NULL,
+			DBUS_TYPE_UINT32, &handle,
+			DBUS_TYPE_INVALID))
+		return invalid_args(msg);
+
+	if (remove_record_from_server(handle))
+		return g_dbus_create_error(msg,
+				ERROR_INTERFACE ".Failed",
+				"Failed to remove sdp record");
+
+	return dbus_message_new_method_return(msg);
+}
+
 static GDBusMethodTable adapter_methods[] = {
 	{ "GetProperties",	"",	"a{sv}",get_properties		},
 	{ "SetProperty",	"sv",	"",	set_property,
@@ -1683,6 +1786,8 @@ static GDBusMethodTable adapter_methods[] = {
 	{ "FindDevice",		"s",	"o",	find_device		},
 	{ "RegisterAgent",	"os",	"",	register_agent		},
 	{ "UnregisterAgent",	"o",	"",	unregister_agent	},
+	{ "AddRfcommServiceRecord",	"sttq",	"u",	add_rfcomm_service_record },
+	{ "RemoveServiceRecord",	"u",	"",	remove_service_record },
 	{ }
 };
 
