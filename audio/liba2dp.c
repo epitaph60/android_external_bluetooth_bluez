@@ -88,6 +88,9 @@
 /* timeout in milliseconds for a2dp_write */
 #define WRITE_TIMEOUT			1000
 
+/* timeout in seconds for command socket recv() */
+#define RECV_TIMEOUT            5
+
 
 typedef enum {
 	A2DP_STATE_NONE = 0,
@@ -786,6 +789,7 @@ static int audioservice_expect(struct bluetooth_data *data,
 static int bluetooth_init(struct bluetooth_data *data)
 {
 	int sk, err;
+        struct timeval tv = {.tv_sec = RECV_TIMEOUT};
 
 	DBG("bluetooth_init");
 
@@ -794,6 +798,8 @@ static int bluetooth_init(struct bluetooth_data *data)
 		ERR("bt_audio_service_open failed\n");
 		return -errno;
 	}
+
+        setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	data->server.fd = sk;
 	data->server.events = POLLIN;
@@ -919,7 +925,7 @@ static int wait_for_start(struct bluetooth_data *data, int timeout)
 	pthread_mutex_lock(&data->mutex);
 	while (state != A2DP_STATE_STARTED) {
 		if (state == A2DP_STATE_NONE)
-			set_command(data, A2DP_CMD_INIT);
+			__set_command(data, A2DP_CMD_INIT);
 		else if (state == A2DP_STATE_INITIALIZED)
 			__set_command(data, A2DP_CMD_CONFIGURE);
 		else if (state == A2DP_STATE_CONFIGURED) {
