@@ -1016,9 +1016,11 @@ static void device_remove_stored(struct btd_device *device,
 
 	adapter_get_address(device->adapter, &src);
 	ba2str(&device->bdaddr, addr);
+
 	device_remove_bonding(device, conn);
 	delete_entry(&src, "profiles", addr);
 	delete_entry(&src, "trusts", addr);
+	delete_all_records(&src, &device->bdaddr);
 }
 
 void device_remove(struct btd_device *device, DBusConnection *conn,
@@ -1213,8 +1215,6 @@ static void device_remove_drivers(struct btd_device *device, GSList *uuids)
 		next = list->next;
 
 		for (uuid = driver->uuids; *uuid; uuid++) {
-			sdp_record_t *rec;
-
 			if (!g_slist_find_custom(uuids, *uuid,
 					(GCompareFunc) strcasecmp))
 				continue;
@@ -1227,24 +1227,28 @@ static void device_remove_drivers(struct btd_device *device, GSList *uuids)
 								driver_data);
 			g_free(driver_data);
 
-			rec = find_record_in_list(records, *uuid);
-			if (!rec)
-				break;
-
-			delete_record(srcaddr, dstaddr, rec->handle);
-
-			records = sdp_list_remove(records, rec);
-			sdp_record_free(rec);
-
 			break;
 		}
 	}
 
+	for (list = uuids; list; list = list->next) {
+		sdp_record_t *rec;
+
+		device->uuids = g_slist_remove(device->uuids, list->data);
+
+		rec = find_record_in_list(records, list->data);
+		if (!rec)
+			continue;
+
+		delete_record(srcaddr, dstaddr, rec->handle);
+
+		records = sdp_list_remove(records, rec);
+		sdp_record_free(rec);
+
+	}
+
 	if (records)
 		sdp_list_free(records, (sdp_free_func_t) sdp_record_free);
-
-	for (list = uuids; list; list = list->next)
-		device->uuids = g_slist_remove(device->uuids, list->data);
 }
 
 static void services_changed(struct btd_device *device)
@@ -1386,16 +1390,16 @@ static void search_cb(sdp_list_t *recs, int err, gpointer user_data)
 
 	update_services(req, recs);
 
-	if (!req->profiles_added && !req->profiles_removed) {
-		debug("%s: No service update", device->path);
-		goto proceed;
-	}
-
 	if (device->tmp_records && req->records) {
 		sdp_list_free(device->tmp_records,
 					(sdp_free_func_t) sdp_record_free);
 		device->tmp_records = req->records;
 		req->records = NULL;
+	}
+
+	if (!req->profiles_added && !req->profiles_removed) {
+		debug("%s: No service update", device->path);
+		goto proceed;
 	}
 
 	/* Probe matching drivers for services added */
