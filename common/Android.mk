@@ -15,6 +15,11 @@ LOCAL_CFLAGS+= \
 	-O3 \
 	-DNEED_DBUS_WATCH_GET_UNIX_FD
 
+ifeq ($(BOARD_HAVE_BLUETOOTH_BCM),true)
+LOCAL_CFLAGS += \
+	-DBOARD_HAVE_BLUETOOTH_BCM
+endif
+
 LOCAL_C_INCLUDES:= \
 	$(LOCAL_PATH)/../include \
 	$(call include-path-for, glib) \

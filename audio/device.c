@@ -366,6 +366,9 @@ static void device_sink_cb(struct audio_device *dev,
 	case SINK_STATE_CONNECTED:
 		if (old_state == SINK_STATE_PLAYING)
 			break;
+#ifdef ANDROID
+		android_set_high_priority(&dev->dst);
+#endif
 		if (dev->auto_connect) {
 			if (!dev->headset)
 				device_set_state(dev, AUDIO_STATE_CONNECTED);
