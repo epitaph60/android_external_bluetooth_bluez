@@ -1160,7 +1160,8 @@ int a2dp_write(a2dpData d, const void* buffer, int count)
 		data->nsamples += encoded;
 
 		/* No space left for another frame then send */
-		if (data->count + written >= data->link_mtu) {
+		if ((data->count + written >= data->link_mtu) ||
+				(data->count + written >= BUFFER_SIZE)) {
 			VDBG("sending packet %d, count %d, link_mtu %u",
 					data->seq_num, data->count,
 					data->link_mtu);
