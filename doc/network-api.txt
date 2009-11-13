@@ -1,0 +1,86 @@
+BlueZ D-Bus Network API description
+***********************************
+
+Copyright (C) 2004-2008  Marcel Holtmann <marcel@holtmann.org>
+
+
+Network hierarchy
+=================
+
+Service		org.bluez
+Interface	org.bluez.Network
+Object path	[variable prefix]/{hci0,hci1,...}/dev_XX_XX_XX_XX_XX_XX
+
+Methods		string Connect(string uuid)
+
+			Connect to the network device and return the network
+			device name. Examples of the device name are bnep0,
+			bnep1 etc.
+
+			Possible errors: org.bluez.Error.AlreadyConnected
+					 org.bluez.Error.ConnectionAttemptFailed
+
+		void Disconnect()
+
+			Disconnect from the network device.
+
+			To abort a connection attempt in case of errors or
+			timeouts in the client it is fine to call this method.
+
+			Possible errors: org.bluez.Error.Failed
+
+		dict GetProperties()
+
+			Returns all properties for the interface. See the
+			properties section for available properties.
+
+Signals		PropertyChanged(string name, variant value)
+
+			This signal indicates a changed value of the given
+			property.
+
+Properties	boolean Connected [readonly]
+
+			Indicates if the device is connected.
+
+		string Device [readonly]
+
+			Indicates the network interface name when available.
+
+		string UUID [readonly]
+
+			Indicates the connection role when available.
+
+
+Network Hub/Peer/Router hierarchy
+=================
+
+Service		org.bluez
+Interface	org.bluez.network.{Hub, Peer, Router}
+Object path	/org/bluez/{hci0,hci1,...}
+
+Methods		dict GetProperties()
+
+			Returns all properties for the GN/PANU/NAP server. See the
+			properties section for available properties.
+
+		void SetProperty(string name, variant value)
+
+			Changes the value of the specified property. Only
+			properties that are listed a read-write are changeable.
+			On success this will emit a PropertyChanged signal.
+
+			Possible Errors: org.bluez.Error.DoesNotExist
+					 org.bluez.Error.InvalidArguments
+
+Properties	string Name[readwrite]
+
+			The Bluetooth network server name.
+
+		boolean Enable[readwrite]
+
+			Indicates if the server is Enabled/Disabled.
+
+		string Uuid[readonly]
+
+			The Bluetooth network server UUID 128 identification.

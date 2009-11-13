@@ -1,0 +1,32 @@
+#!/bin/sh
+
+if [ -f config.status ]; then
+	make maintainer-clean
+fi
+
+if [ ! -f doc/gtk-doc.make ]; then
+	gtkdocize --copy --docdir doc
+fi
+
+./bootstrap && \
+    ./configure --enable-maintainer-mode \
+		--enable-debug \
+		--prefix=/usr \
+		--mandir=/usr/share/man \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
+		--libexecdir=/lib \
+		--enable-netlink \
+		--enable-tools \
+		--enable-bccmd \
+		--enable-dfutool \
+		--enable-hid2hci \
+		--enable-hidd \
+		--enable-pand \
+		--enable-dund \
+		--enable-test \
+		--enable-cups \
+		--disable-pcmcia \
+		--disable-manpages \
+		--disable-udevrules \
+		--disable-configfiles $*
