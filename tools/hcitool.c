@@ -105,9 +105,9 @@ static int conn_list(int s, int dev_id, long arg)
 		char *str;
 		ba2str(&ci->bdaddr, addr);
 		str = hci_lmtostr(ci->link_mode);
-		printf("\t%s %s %s handle %d state %d lm %s\n",
+		printf("\t%s %s %s handle %d state %d lm %s mtu %d credits %d/%d\n",
 			ci->out ? "<" : ">", type2str(ci->type),
-			addr, ci->handle, ci->state, str);
+			addr, ci->handle, ci->state, str, ci->mtu, ci->cnt, ci->pkts);
 		bt_free(str);
 	}
 
