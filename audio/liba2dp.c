@@ -115,7 +115,7 @@ typedef enum {
 } a2dp_command_t;
 
 struct bluetooth_data {
-	int link_mtu;					/* MTU for transport channel */
+	unsigned int link_mtu;			/* MTU for transport channel */
 	struct pollfd stream;			/* Audio stream filedescriptor */
 	struct pollfd server;			/* Audio daemon filedescriptor */
 	a2dp_state_t state;				/* Current A2DP state */
@@ -846,7 +846,7 @@ static int bluetooth_parse_capabilities(struct bluetooth_data *data,
 			break;
 
 		bytes_left -= codec->length;
-		codec = (void *) codec + codec->length;
+		codec = (void *) (codec + codec->length);
 	}
 
 	if (bytes_left <= 0 ||
@@ -1004,7 +1004,7 @@ static void* a2dp_thread(void *d)
 	a2dp_command_t command = A2DP_CMD_NONE;
 
 	DBG("a2dp_thread started");
-	prctl(PR_SET_NAME, "a2dp_thread", 0, 0, 0);
+	prctl(PR_SET_NAME, (int)"a2dp_thread", 0, 0, 0);
 
 	pthread_mutex_lock(&data->mutex);
 
@@ -1148,7 +1148,8 @@ int a2dp_write(a2dpData d, const void* buffer, int count)
 	int codesize;
 	int err, ret = 0;
 	long frames_left = count;
-	int encoded, written;
+	int encoded;
+	unsigned int written;
 	const char *buff;
 	int did_configure = 0;
 #ifdef ENABLE_TIMING
