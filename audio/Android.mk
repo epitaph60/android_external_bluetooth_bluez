@@ -65,6 +65,8 @@ LOCAL_CFLAGS:= -funroll-loops
 
 LOCAL_C_INCLUDES:= \
 	$(LOCAL_PATH)/../sbc \
+    ../../../../frameworks/base/include \
+	system/bluetooth/bluez-clean-headers
 
 LOCAL_SHARED_LIBRARIES := \
 	libcutils

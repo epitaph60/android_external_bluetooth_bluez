@@ -39,6 +39,9 @@
 #include <sys/poll.h>
 #include <sys/prctl.h>
 
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/l2cap.h>
+
 #include "ipc.h"
 #include "sbc.h"
 #include "rtp.h"
@@ -181,6 +184,31 @@ static void bluetooth_close(struct bluetooth_data *data)
 	data->state = A2DP_STATE_NONE;
 }
 
+static int l2cap_set_flushable(int fd, int flushable)
+{
+	int flags;
+	socklen_t len;
+
+	len = sizeof(flags);
+	if (getsockopt(fd, SOL_L2CAP, L2CAP_LM, &flags, &len) < 0)
+		return -errno;
+
+	if (flushable) {
+		if (flags & L2CAP_LM_FLUSHABLE)
+			return 0;
+		flags |= L2CAP_LM_FLUSHABLE;
+	} else {
+		if (!(flags & L2CAP_LM_FLUSHABLE))
+			return 0;
+		flags &= ~L2CAP_LM_FLUSHABLE;
+	}
+
+	if (setsockopt(fd, SOL_L2CAP, L2CAP_LM, &flags, sizeof(flags)) < 0)
+		return -errno;
+
+	return 0;
+}
+
 static int bluetooth_start(struct bluetooth_data *data)
 {
 	char c = 'w';
@@ -219,6 +247,7 @@ static int bluetooth_start(struct bluetooth_data *data)
 		err = -errno;
 		goto error;
 	}
+	l2cap_set_flushable(data->stream.fd, 1);
 	data->stream.events = POLLOUT;
 
 	/* set our socket buffer to the size of PACKET_BUFFER_COUNT packets */
@@ -254,6 +283,7 @@ static int bluetooth_stop(struct bluetooth_data *data)
 	DBG("bluetooth_stop");
 
 	data->state = A2DP_STATE_STOPPING;
+	l2cap_set_flushable(data->stream.fd, 0);
 	if (data->stream.fd >= 0) {
 		close(data->stream.fd);
 		data->stream.fd = -1;
@@ -649,14 +679,7 @@ static int avdtp_write(struct bluetooth_data *data)
 		} else {
 			data->next_write = now;
 		}
-		if (ahead < 0) {
-			/* fallen too far behind, don't try to catch up */
-			VDBG("ahead < 0, resetting next_write");
-			data->next_write = 0;
-		} else {
-			/* advance next_write by duration */
-			data->next_write += duration;
-		}
+		data->next_write += duration;
 
 #ifdef ENABLE_TIMING
 		begin2 = get_microseconds();
