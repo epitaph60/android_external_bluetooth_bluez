@@ -51,7 +51,9 @@ void android_set_aid_and_cap() {
 	capset(&header, &cap);
 }
 
-static int write_flush_timeout(int fd, uint16_t handle, uint16_t timeout) {
+static int write_flush_timeout(int fd, uint16_t handle,
+        unsigned int timeout_ms) {
+    uint16_t timeout = (timeout_ms * 1000) / 625;  // timeout units of 0.625ms
     unsigned char hci_write_flush_cmd[] = {
         0x01,               // HCI command packet
         0x28, 0x0C,         // HCI_Write_Automatic_Flush_Timeout
@@ -185,7 +187,7 @@ int android_set_high_priority(bdaddr_t *ba) {
     ret = vendor_high_priority(fd, acl_handle);
     if (ret < 0)
         goto out;
-    ret = write_flush_timeout(fd, acl_handle, 0x60);
+    ret = write_flush_timeout(fd, acl_handle, 120);
 
 out:
     close(fd);
