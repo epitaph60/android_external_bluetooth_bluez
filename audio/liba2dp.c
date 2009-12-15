@@ -88,6 +88,10 @@
 /* timeout in milliseconds to prevent poll() from hanging indefinitely */
 #define POLL_TIMEOUT			1000
 
+/* milliseconds of unsucessfull a2dp packets before we stop trying to catch up
+ * on write()'s and fall-back to metered writes */
+#define CATCH_UP_TIMEOUT		200
+
 /* timeout in milliseconds for a2dp_write */
 #define WRITE_TIMEOUT			1000
 
@@ -679,7 +683,13 @@ static int avdtp_write(struct bluetooth_data *data)
 		} else {
 			data->next_write = now;
 		}
-		data->next_write += duration;
+		if (ahead <= -CATCH_UP_TIMEOUT * 1000) {
+			/* fallen too far behind, don't try to catch up */
+			VDBG("ahead < %d, reseting next_write timestamp", -CATCH_UP_TIMEOUT * 1000);
+			data->next_write = 0;
+		} else {
+			data->next_write += duration;
+		}
 
 #ifdef ENABLE_TIMING
 		begin2 = get_microseconds();
@@ -700,6 +710,7 @@ static int avdtp_write(struct bluetooth_data *data)
 		/* can happen during normal remote disconnect */
 		VDBG("poll() failed: %d (revents = %d, errno %s)",
 				ret, data->stream.revents, strerror(errno));
+		data->next_write = 0;
 	}
 
 	/* Reset buffer of data to send */
