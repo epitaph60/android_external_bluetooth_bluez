@@ -153,9 +153,9 @@ struct bluetooth_data {
 
 static uint64_t get_microseconds()
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
-	return (now.tv_sec * 1000000UL + now.tv_usec);
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec * 1000000UL + now.tv_nsec / 1000UL);
 }
 
 #ifdef ENABLE_TIMING
