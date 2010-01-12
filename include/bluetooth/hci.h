@@ -1778,6 +1778,9 @@ struct hci_conn_info {
 	uint8_t	 out;
 	uint16_t state;
 	uint32_t link_mode;
+	uint32_t mtu;
+	uint32_t cnt;
+	uint32_t pkts;
 };
 
 struct hci_dev_req {

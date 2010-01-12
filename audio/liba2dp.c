@@ -39,6 +39,9 @@
 #include <sys/poll.h>
 #include <sys/prctl.h>
 
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/l2cap.h>
+
 #include "ipc.h"
 #include "sbc.h"
 #include "rtp.h"
@@ -85,6 +88,10 @@
 /* timeout in milliseconds to prevent poll() from hanging indefinitely */
 #define POLL_TIMEOUT			1000
 
+/* milliseconds of unsucessfull a2dp packets before we stop trying to catch up
+ * on write()'s and fall-back to metered writes */
+#define CATCH_UP_TIMEOUT		200
+
 /* timeout in milliseconds for a2dp_write */
 #define WRITE_TIMEOUT			1000
 
@@ -112,7 +119,7 @@ typedef enum {
 } a2dp_command_t;
 
 struct bluetooth_data {
-	int link_mtu;					/* MTU for transport channel */
+	unsigned int link_mtu;			/* MTU for transport channel */
 	struct pollfd stream;			/* Audio stream filedescriptor */
 	struct pollfd server;			/* Audio daemon filedescriptor */
 	a2dp_state_t state;				/* Current A2DP state */
@@ -146,9 +153,9 @@ struct bluetooth_data {
 
 static uint64_t get_microseconds()
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
-	return (now.tv_sec * 1000000UL + now.tv_usec);
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec * 1000000UL + now.tv_nsec / 1000UL);
 }
 
 #ifdef ENABLE_TIMING
@@ -179,6 +186,31 @@ static void bluetooth_close(struct bluetooth_data *data)
 	}
 
 	data->state = A2DP_STATE_NONE;
+}
+
+static int l2cap_set_flushable(int fd, int flushable)
+{
+	int flags;
+	socklen_t len;
+
+	len = sizeof(flags);
+	if (getsockopt(fd, SOL_L2CAP, L2CAP_LM, &flags, &len) < 0)
+		return -errno;
+
+	if (flushable) {
+		if (flags & L2CAP_LM_FLUSHABLE)
+			return 0;
+		flags |= L2CAP_LM_FLUSHABLE;
+	} else {
+		if (!(flags & L2CAP_LM_FLUSHABLE))
+			return 0;
+		flags &= ~L2CAP_LM_FLUSHABLE;
+	}
+
+	if (setsockopt(fd, SOL_L2CAP, L2CAP_LM, &flags, sizeof(flags)) < 0)
+		return -errno;
+
+	return 0;
 }
 
 static int bluetooth_start(struct bluetooth_data *data)
@@ -219,6 +251,7 @@ static int bluetooth_start(struct bluetooth_data *data)
 		err = -errno;
 		goto error;
 	}
+	l2cap_set_flushable(data->stream.fd, 1);
 	data->stream.events = POLLOUT;
 
 	/* set our socket buffer to the size of PACKET_BUFFER_COUNT packets */
@@ -254,6 +287,7 @@ static int bluetooth_stop(struct bluetooth_data *data)
 	DBG("bluetooth_stop");
 
 	data->state = A2DP_STATE_STOPPING;
+	l2cap_set_flushable(data->stream.fd, 0);
 	if (data->stream.fd >= 0) {
 		close(data->stream.fd);
 		data->stream.fd = -1;
@@ -649,12 +683,11 @@ static int avdtp_write(struct bluetooth_data *data)
 		} else {
 			data->next_write = now;
 		}
-		if (ahead < 0) {
+		if (ahead <= -CATCH_UP_TIMEOUT * 1000) {
 			/* fallen too far behind, don't try to catch up */
-			VDBG("ahead < 0, resetting next_write");
+			VDBG("ahead < %d, reseting next_write timestamp", -CATCH_UP_TIMEOUT * 1000);
 			data->next_write = 0;
 		} else {
-			/* advance next_write by duration */
 			data->next_write += duration;
 		}
 
@@ -677,6 +710,7 @@ static int avdtp_write(struct bluetooth_data *data)
 		/* can happen during normal remote disconnect */
 		VDBG("poll() failed: %d (revents = %d, errno %s)",
 				ret, data->stream.revents, strerror(errno));
+		data->next_write = 0;
 	}
 
 	/* Reset buffer of data to send */
@@ -823,7 +857,7 @@ static int bluetooth_parse_capabilities(struct bluetooth_data *data,
 			break;
 
 		bytes_left -= codec->length;
-		codec = (void *) codec + codec->length;
+		codec = (void *) (codec + codec->length);
 	}
 
 	if (bytes_left <= 0 ||
@@ -981,7 +1015,7 @@ static void* a2dp_thread(void *d)
 	a2dp_command_t command = A2DP_CMD_NONE;
 
 	DBG("a2dp_thread started");
-	prctl(PR_SET_NAME, "a2dp_thread", 0, 0, 0);
+	prctl(PR_SET_NAME, (int)"a2dp_thread", 0, 0, 0);
 
 	pthread_mutex_lock(&data->mutex);
 
@@ -1125,7 +1159,8 @@ int a2dp_write(a2dpData d, const void* buffer, int count)
 	int codesize;
 	int err, ret = 0;
 	long frames_left = count;
-	int encoded, written;
+	int encoded;
+	unsigned int written;
 	const char *buff;
 	int did_configure = 0;
 #ifdef ENABLE_TIMING
